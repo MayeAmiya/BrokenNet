@@ -492,6 +492,8 @@ function registerRoomSubscriptions(): void {
     // 参考格式：人类 = name;packed;ready（3 字段），AI = AILevel;packed（2 字段，AILevel 0=简单 1=普通 2=困难）
     for (let i = 0; i + 1 < parts.length;) {
       const name = parts[i]
+      // 空名：参考广播末尾带分号，split 会多出空串，跳过（对齐参考忽略空名）
+      if (!name) { i += 3; continue }
       const u = unpackPo(parseInt(parts[i + 1], 10) || 0)
       const aiLevelNum = parseInt(name, 10)
       if (!isNaN(aiLevelNum)) {
