@@ -8,13 +8,49 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
+    "dist": "npm run build && electron-builder --win",
     "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json"
+  },
+  "build": {
+    "appId": "com.brokennet.launcher",
+    "productName": "BrokenNet",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/7z.exe",
+        "to": "7z.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "artifactName": "BrokenNet-${version}-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "BrokenNet-${version}-Portable.${ext}"
+    }
   },
   "devDependencies": {
     "@swc/core": "^1.15.46",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-vue": "^6.0.8",
     "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "iconv-lite": "^0.7.3",
     "tailwindcss": "^4.3.3",
