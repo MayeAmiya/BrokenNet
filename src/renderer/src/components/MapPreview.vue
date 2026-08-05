@@ -185,7 +185,7 @@ function getPlayerColor(playerIndex: number): string {
     @mouseenter="showBriefing = false"
     @mouseleave="showBriefing = true"
   >
-    <!-- Inner transform layer -->
+    <!-- Inner transform layer（含出生点标记：缩放/拖动时一起变换，保持与底图对齐） -->
     <div class="absolute inset-0" :style="transformStyle">
       <img
         v-if="previewUrl && !imgError"
@@ -196,30 +196,31 @@ function getPlayerColor(playerIndex: number): string {
         @load="onImgLoad"
         @error="onImgError"
       />
-    </div>
 
-    <!-- Starting Location Indicators -->
-    <div
-      v-for="loc in startingLocations"
-      :key="loc.waypoint"
-      class="absolute flex -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center z-10"
-      :style="getLocationStyle(loc)"
-      @click.stop="emit('location-click', loc.waypoint)"
-    >
+      <!-- Starting Location Indicators（在变换层内，位置按 object-contain 底图坐标） -->
       <div
-        class="flex h-5 w-5 items-center justify-center rounded-full border-2 border-white/80"
-        :style="{
-          backgroundColor: assignedLocations?.[loc.waypoint] !== undefined
-            ? getPlayerColor(assignedLocations[loc.waypoint])
-            : 'rgba(255,255,255,0.2)',
-          boxShadow: assignedLocations?.[loc.waypoint] !== undefined
-            ? '0 0 6px rgba(255,255,255,0.5)'
-            : 'none'
-        }"
+        v-for="loc in startingLocations"
+        :key="loc.waypoint"
+        class="absolute flex -translate-x-1/2 -translate-y-1/2 cursor-pointer items-center justify-center z-10"
+        :style="getLocationStyle(loc)"
+        @mousedown.stop
+        @click.stop="emit('location-click', loc.waypoint)"
       >
-        <span class="text-[9px] font-bold text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]">
-          {{ loc.waypoint }}
-        </span>
+        <div
+          class="flex h-5 w-5 items-center justify-center rounded-full border-2 border-white/80"
+          :style="{
+            backgroundColor: assignedLocations?.[loc.waypoint] !== undefined
+              ? getPlayerColor(assignedLocations[loc.waypoint])
+              : 'rgba(255,255,255,0.2)',
+            boxShadow: assignedLocations?.[loc.waypoint] !== undefined
+              ? '0 0 6px rgba(255,255,255,0.5)'
+              : 'none'
+          }"
+        >
+          <span class="text-[9px] font-bold text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]">
+            {{ loc.waypoint }}
+          </span>
+        </div>
       </div>
     </div>
 
