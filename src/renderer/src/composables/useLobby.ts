@@ -1840,6 +1840,9 @@ export function useLobby() {
     if (currentRoom.value) currentRoom.value.tunnelServer = address
     // 更新主进程托管房间的隧道并重新广播 GAME，其他玩家才能看到/用同一个隧道
     await window.api.cncnet.setTunnel(address)
+    // 参考协议：房主换隧道广播 CHTNL <address:port>，官方客户端据此更新 CurrentTunnel
+    //（它不靠 GAME/START 换隧道，不发的话对方 spawn.ini 一直是旧隧道）
+    window.api.cncnet.sendCtcp(currentRoom.value?.channelName ?? '', 'CHTNL', address)
     await broadcastMyPing()
     pushRoomNotice(`已选择服务器 ${address}`)
   }

@@ -360,6 +360,8 @@ function registerCncnetHandlers(): void {
       case 'FHSH':
       case 'TNLPNG':
       case 'DR':
+      // 换隧道（房主广播，官方客户端据此更新 CurrentTunnel）
+      case 'CHTNL':
       // launcher 专属自定义命令
       case 'L-HI':
       case 'L-OK':
