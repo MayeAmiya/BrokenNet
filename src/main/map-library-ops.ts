@@ -14,6 +14,7 @@ import { extractArchive } from './archive'
 import { getResourceDir } from './resource-dir'
 import { MAP_EXTENSIONS } from './map-preview'
 import type { LibraryMap, ImportResult } from '../shared/types/content'
+import { resolveDirectChild } from './security-boundaries'
 
 /** 地图库目录 resourceDir/<gameId>/maps */
 async function getMapsDir(gameId: string): Promise<string> {
@@ -133,7 +134,7 @@ async function importMaps(webContents: Electron.WebContents, gameId: string): Pr
 async function deleteMap(gameId: string, name: string): Promise<{ ok: boolean; error?: string }> {
   try {
     const mapsDir = await getMapsDir(gameId)
-    await rm(join(mapsDir, name), { recursive: true, force: true })
+    await rm(resolveDirectChild(mapsDir, name), { recursive: true, force: true })
     return { ok: true }
   } catch (e) {
     const err = e as Error

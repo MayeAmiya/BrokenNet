@@ -40,6 +40,7 @@ import { loadUserDefaults } from './user-defaults'
 import { loadMusicThemes } from './music-theme-reader'
 import { readMultiplayerLobbyOptions } from './game-options-reader'
 import { applyPlayground } from './playground-manager'
+import { isAllowedExternalUrl } from './security-boundaries'
 
 const isDev = !app.isPackaged
 
@@ -126,7 +127,7 @@ function createWindow(): void {
 
   // 站外链接一律丢给系统浏览器，不在启动器里开新窗口
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    if (isAllowedExternalUrl(url)) void shell.openExternal(url)
     return { action: 'deny' }
   })
 

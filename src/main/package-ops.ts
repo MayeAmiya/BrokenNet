@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { extractArchive } from './archive'
 import { getResourceDir } from './resource-dir'
 import type { PlaySet, InstalledPackage, ImportResult } from '../shared/types/content'
+import { resolveDirectChild } from './security-boundaries'
 
 /** 复制游戏本体时排除的运行时写目录（MentalOmega 包只含只读资源） */
 export const GAME_COPY_EXCLUDE = new Set([
@@ -239,7 +240,7 @@ async function importPackageFromPaths(gameId: string, filePaths: string[]): Prom
 async function deletePackage(gameId: string, name: string): Promise<{ ok: boolean; error?: string }> {
   try {
     const packagesDir = await getPackagesDir(gameId)
-    await rm(join(packagesDir, name), { recursive: true, force: true })
+    await rm(resolveDirectChild(packagesDir, name), { recursive: true, force: true })
     return { ok: true }
   } catch (e) {
     const err = e as Error
