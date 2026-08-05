@@ -38,6 +38,9 @@ const api = {
     }> => ipcRenderer.invoke('fs:list-replays', gameId),
     selectDirectory: (): Promise<{ path: string | null }> =>
       ipcRenderer.invoke('fs:select-directory'),
+    /** 首启引导：在基目录下创建 BrokenNetLib 并设为资源库（已存在则复用不覆写） */
+    initResourceDir: (basePath: string): Promise<{ ok: boolean; path?: string; reused?: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:init-resource-dir', basePath),
     getConfig: (key: string): Promise<string | null> =>
       ipcRenderer.invoke('fs:get-config', key),
     setConfig: (key: string, value: string): Promise<{ ok: boolean; error?: string }> =>

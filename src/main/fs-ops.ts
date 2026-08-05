@@ -62,6 +62,25 @@ export function registerFsHandlers(): void {
   ipcMain.handle('fs:list-maps', (_e, gameId: string) => listDirFiles(gameId, 'maps'))
   ipcMain.handle('fs:list-replays', (_e, gameId: string) => listDirFiles(gameId, 'replay'))
   ipcMain.handle('fs:select-directory', (e) => selectDirectory(e.sender))
+  // 首启引导：在用户选择的基目录下创建 BrokenNetLib 并设为资源库。
+  // 若 BrokenNetLib 已存在则直接复用（不覆写库内已有内容），返回 reused 标记
+  ipcMain.handle('fs:init-resource-dir', async (_e, basePath: string) => {
+    try {
+      if (!basePath) return { ok: false, error: '未选择位置' }
+      const dir = join(basePath, 'BrokenNetLib')
+      let reused = false
+      try {
+        reused = (await stat(dir)).isDirectory()
+      } catch {
+        // 目录不存在
+      }
+      if (!reused) await mkdir(dir, { recursive: true })
+      await setConfig('resourceDir', dir)
+      return { ok: true, path: dir, reused }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
+  })
   ipcMain.handle('fs:get-config', (_e, key: string) => getConfig(key))
   ipcMain.handle('fs:set-config', (_e, key: string, value: string) => setConfig(key, value))
   ipcMain.handle('fs:create-game-dirs', (_e, gameConfig: GameConfig) => createGameDirs(gameConfig))
