@@ -1,8 +1,8 @@
 import { ref, computed } from 'vue'
 import type {
   CampaignConfig,
-  CampaignBranch,
-  CampaignSide,
+  CampaignAct,
+  CampaignGroup,
   Mission,
   MissionProgress,
   CampaignUserSettings,
@@ -17,7 +17,7 @@ const CAMPAIGN_CONFIGS = new Map<string, CampaignConfig>()
 
 const currentModSetId = ref<string>('')
 const config = ref<CampaignConfig | null>(null)
-const selectedBranchId = ref<string | null>(null)
+const selectedLineKey = ref<string | null>(null)
 const selectedMissionCode = ref<string | null>(null)
 const difficulty = ref<Difficulty>('medium')
 const progress = ref<Map<string, MissionProgress>>(new Map())
@@ -55,8 +55,9 @@ function saveSettings(modSetId: string): void {
 
 // ─── 从 BattleClient.ini 加载真实数据 ───────────────────
 
+/** 侧名 → sideId（SideName 可能有 X 后缀，如 AlliesX，剥掉后再映射） */
 function mapSideNameToId(sideName: string): string {
-  const s = sideName.toLowerCase()
+  const s = sideName.toLowerCase().replace(/x$/, '')
   if (s === 'allies') return 'allies'
   if (s === 'soviets') return 'soviets'
   if (s === 'epsilon') return 'epsilon'
@@ -64,49 +65,63 @@ function mapSideNameToId(sideName: string): string {
   return s || 'special'
 }
 
-function buildCampaignConfig(modSetId: string, gameId: string, branches: any[]): CampaignConfig {
-  const sidesMap = new Map<string, CampaignSide>()
-  const sideNames: Record<string, string> = {
-    allies: '盟军',
-    soviets: '苏联',
-    epsilon: '厄普西隆',
-    foehn: '焚风',
-    special: '特殊行动'
+/** 关卡列表里的一段：子分割（组）标题 + 关卡；无子分割时 header 为 null */
+export interface CampaignSection {
+  header: string | null
+  missions: Mission[]
+}
+
+/** 战役线（侧栏的一项）：一幕或独立分组，展开成若干段 */
+export interface CampaignLineRef {
+  key: string
+  label: string
+  sections: CampaignSection[]
+}
+
+function toMission(m: any): Mission {
+  return {
+    codeName: m.id,
+    name: m.description || m.id,
+    // MO 的描述文本用 @ 作为换行符，转成真实换行
+    description: (m.longDescription || m.description || '').replace(/@/g, '\n'),
+    scenario: m.scenario,
+    sideId: mapSideNameToId(m.sideName),
+    side: m.side,
+    finalMovie: m.finalMovie || undefined,
+    buildOffAlly: m.buildOffAlly,
+    // MO 是 YR 的 mod，用 Ra2Mode，不需要"资料片"（Firestorm）标记
+    requiredAddon: false,
+    enabled: m.enabled
   }
+}
 
-  const campaignBranches: CampaignBranch[] = branches.map((b: any) => {
-    const sideId = mapSideNameToId(b.name)
-    if (!sidesMap.has(sideId)) {
-      sidesMap.set(sideId, { id: sideId, name: sideNames[sideId] ?? b.label })
-    }
+function mapGroup(g: any): CampaignGroup {
+  return {
+    id: g.id,
+    label: g.label,
+    missions: (g.missions ?? []).map(toMission)
+  }
+}
 
-    const missions: Mission[] = b.missions.map((m: any) => ({
-      codeName: m.id,
-      name: m.description || m.id,
-      // MO 的描述文本用 @ 作为换行符，转成真实换行
-      description: (m.longDescription || m.description || '').replace(/@/g, '\n'),
-      scenario: m.scenario,
-      sideId: mapSideNameToId(m.sideName),
-      finalMovie: m.finalMovie || undefined,
-      buildOffAlly: m.buildOffAlly,
-      // MO 是 YR 的 mod，用 Ra2Mode，不需要"资料片"（Firestorm）标记
-      requiredAddon: false
+function buildCampaignConfig(modSetId: string, gameId: string, layout: any): CampaignConfig {
+  const acts: CampaignAct[] = (layout.acts ?? [])
+    .map((a: any) => ({
+      id: a.id,
+      label: a.label,
+      missions: (a.missions ?? []).map(toMission),
+      groups: (a.groups ?? []).map(mapGroup).filter((g: CampaignGroup) => g.missions.length > 0)
     }))
+    .filter((a: CampaignAct) => a.missions.length > 0 || a.groups.length > 0)
 
-    return {
-      id: `${sideId}-campaign`,
-      name: `${b.label}战役`,
-      description: `${b.label}战役线`,
-      sideId,
-      missions
-    }
-  })
+  const standalone: CampaignGroup[] = (layout.standalone ?? [])
+    .map(mapGroup)
+    .filter((g: CampaignGroup) => g.missions.length > 0)
 
   return {
     modSetId,
     gameId,
-    sides: Array.from(sidesMap.values()),
-    branches: campaignBranches
+    acts,
+    standalone
   }
 }
 
@@ -115,15 +130,14 @@ async function loadCampaignData(modSetId: string, gameId: string, gamePath: stri
   isLoading.value = true
   try {
     if (window.api?.campaign) {
-      const branches = await window.api.campaign.load(gamePath)
-      if (branches && branches.length > 0) {
-        const cfg = buildCampaignConfig(modSetId, gameId, branches)
+      const layout = await window.api.campaign.load(gamePath)
+      if (layout && ((layout.acts?.length ?? 0) > 0 || (layout.standalone?.length ?? 0) > 0)) {
+        const cfg = buildCampaignConfig(modSetId, gameId, layout)
         CAMPAIGN_CONFIGS.set(modSetId, cfg)
         // 关键：加载完成后立即更新当前播放集的 config（否则 UI 一直显示"没有战役内容"）
         if (currentModSetId.value === modSetId) {
           config.value = cfg
-          selectedBranchId.value = cfg.branches[0]?.id ?? null
-          selectedMissionCode.value = cfg.branches[0]?.missions[0]?.codeName ?? null
+          selectDefault()
         }
       }
     }
@@ -131,6 +145,74 @@ async function loadCampaignData(modSetId: string, gameId: string, gamePath: stri
     console.error('[Campaign] Failed to load campaign data:', err)
   }
   isLoading.value = false
+}
+
+// ─── 战役线（侧栏）与选择 ───────────────────────────────
+
+const allLines = computed<CampaignLineRef[]>(() => {
+  if (!config.value) return []
+  const actLines: CampaignLineRef[] = config.value.acts.map((act) => {
+    const sections: CampaignSection[] = []
+    if (act.missions.length > 0) sections.push({ header: null, missions: act.missions })
+    for (const g of act.groups) sections.push({ header: g.label, missions: g.missions })
+    return { key: act.id, label: act.label, sections }
+  })
+  const standalone: CampaignLineRef[] = config.value.standalone.map((g) => ({
+    key: `/${g.id}`,
+    label: g.label,
+    sections: [{ header: null, missions: g.missions }]
+  }))
+  return [...actLines, ...standalone]
+})
+
+const selectedLine = computed<CampaignLineRef | null>(() => {
+  return allLines.value.find((l) => l.key === selectedLineKey.value) ?? null
+})
+
+const selectedMission = computed<Mission | null>(() => {
+  if (!selectedLine.value || !selectedMissionCode.value) return null
+  const all = selectedLine.value.sections.flatMap((s) => s.missions)
+  return all.find((m) => m.codeName === selectedMissionCode.value) ?? null
+})
+
+/** 选中的关卡所在段（用于详情栏显示"势力"子分割标题） */
+const selectedMissionSection = computed<CampaignSection | null>(() => {
+  if (!selectedLine.value || !selectedMissionCode.value) return null
+  return selectedLine.value.sections.find((s) =>
+    s.missions.some((m) => m.codeName === selectedMissionCode.value)
+  ) ?? null
+})
+
+function selectLine(lineKey: string): void {
+  const line = allLines.value.find((l) => l.key === lineKey)
+  if (!line) return
+  selectedLineKey.value = lineKey
+  // 默认选中该线第一个可玩关卡；全部禁用则留空
+  const all = line.sections.flatMap((s) => s.missions)
+  selectedMissionCode.value = all.find((m) => m.enabled !== false)?.codeName ?? null
+}
+
+function selectMission(codeName: string): void {
+  const all = selectedLine.value?.sections.flatMap((s) => s.missions) ?? []
+  const mission = all.find((m) => m.codeName === codeName)
+  if (!mission) return
+  // 未开放的关卡不能选中（只能置灰展示）
+  if (mission.enabled === false) return
+  selectedMissionCode.value = codeName
+}
+
+function selectDefault(): void {
+  const line = allLines.value.find((l) =>
+    l.sections.some((s) => s.missions.some((m) => m.enabled !== false))
+  ) ?? allLines.value[0]
+  if (line) {
+    selectedLineKey.value = line.key
+    const all = line.sections.flatMap((s) => s.missions)
+    selectedMissionCode.value = all.find((m) => m.enabled !== false)?.codeName ?? null
+  } else {
+    selectedLineKey.value = null
+    selectedMissionCode.value = null
+  }
 }
 
 // ─── 切换播放集 ──────────────────────────────────────────
@@ -156,23 +238,14 @@ function switchModSet(modSetId: string): void {
   }
 
   // 4. 重置选择
-  selectedBranchId.value = config.value?.branches[0]?.id ?? null
-  selectedMissionCode.value = config.value?.branches[0]?.missions[0]?.codeName ?? null
+  selectDefault()
 }
 
 // ─── Computed ────────────────────────────────────────────
 
-const selectedBranch = computed<CampaignBranch | null>(() => {
-  return config.value?.branches.find(b => b.id === selectedBranchId.value) ?? null
-})
-
-const selectedMission = computed<Mission | null>(() => {
-  if (!selectedBranch.value || !selectedMissionCode.value) return null
-  return selectedBranch.value.missions.find(m => m.codeName === selectedMissionCode.value) ?? null
-})
-
+/** 只统计可玩关卡（未开放的不计入分母，也无法通关） */
 const allMissions = computed<Mission[]>(() => {
-  return config.value?.branches.flatMap(b => b.missions) ?? []
+  return allLines.value.flatMap((l) => l.sections.flatMap((s) => s.missions.filter((m) => m.enabled !== false)))
 })
 
 const totalMissions = computed(() => allMissions.value.length)
@@ -187,16 +260,6 @@ const campaignProgress = computed(() => {
 })
 
 // ─── 方法 ────────────────────────────────────────────────
-
-function selectBranch(branchId: string): void {
-  selectedBranchId.value = branchId
-  const branch = config.value?.branches.find(b => b.id === branchId)
-  selectedMissionCode.value = branch?.missions[0]?.codeName ?? null
-}
-
-function selectMission(codeName: string): void {
-  selectedMissionCode.value = codeName
-}
 
 function setDifficulty(d: Difficulty): void {
   difficulty.value = d
@@ -214,9 +277,9 @@ function isMissionCompleted(codeName: string): boolean {
   return progress.value.get(codeName)?.completed ?? false
 }
 
-function isMissionLocked(_mission: Mission, _branch: CampaignBranch): boolean {
-  // MO 战役配置不锁定任务（BattleClient.ini 无锁定标志），全部可选
-  return false
+/** 未开放的关卡（BattleClient.ini Enabled=False） */
+function isMissionUnavailable(mission: Mission): boolean {
+  return mission.enabled === false
 }
 
 function markCompleted(codeName: string, diff: Difficulty): void {
@@ -246,6 +309,10 @@ async function launchMission(
   gameDirIn: string,
   exe: string
 ): Promise<{ ok: boolean; error?: string }> {
+  if (mission.enabled === false) {
+    return { ok: false, error: '该关卡尚未开放，无法游玩' }
+  }
+
   let gameDir = gameDirIn
   let mapsPath: string | undefined
 
@@ -265,7 +332,9 @@ async function launchMission(
   const humanDiff = diffMap[diff]
   const computerDiff = Math.abs(humanDiff - 2)
 
+  // 优先用 BattleClient.ini 的原始 Side 字段（MO 官方客户端的取值来源）
   const sideMap: Record<string, number> = { allies: 0, soviets: 1, epsilon: 2, foehn: 3 }
+  const side = mission.side ?? (sideMap[mission.sideId] ?? 0)
   // MO 用 Syringe.exe 启动，带 ExtraCommandLineParams
   const isMO = exe === 'Syringe.exe'
   const args = isMO ? ['"gamemd.exe"', '-SPAWN', '-CD', '-SPEEDCONTROL', '-LOG', '-AFFINITY:65535'] : []
@@ -279,7 +348,7 @@ async function launchMission(
       gameDir,
       playerName: 'Player',
       scenario: mission.scenario,
-      side: sideMap[mission.sideId] ?? 0,
+      side,
       color: 0,
       difficultyHuman: humanDiff,
       difficultyComputer: computerDiff,
@@ -298,10 +367,6 @@ async function launchMission(
   return result
 }
 
-function getSideName(sideId: string): string {
-  return config.value?.sides.find(s => s.id === sideId)?.name ?? sideId
-}
-
 function hasCampaign(modSetId: string): boolean {
   return CAMPAIGN_CONFIGS.has(modSetId)
 }
@@ -313,27 +378,28 @@ export function useCampaign() {
     config,
     isLoading,
     currentModSetId,
-    selectedBranchId,
+    selectedLineKey,
     selectedMissionCode,
     difficulty,
     progress,
-    selectedBranch,
+    allLines,
+    selectedLine,
     selectedMission,
+    selectedMissionSection,
     allMissions,
     totalMissions,
     completedCount,
     campaignProgress,
     loadCampaignData,
     switchModSet,
-    selectBranch,
+    selectLine,
     selectMission,
     setDifficulty,
     getMissionProgress,
     isMissionCompleted,
-    isMissionLocked,
+    isMissionUnavailable,
     markCompleted,
     launchMission,
-    getSideName,
     hasCampaign
   }
 }

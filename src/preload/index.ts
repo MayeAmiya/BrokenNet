@@ -4,6 +4,14 @@ import { contextBridge, ipcRenderer } from 'electron'
  * 渲染进程能碰到的全部能力，就这些。
  * 沙箱开着，渲染层拿不到 Node，想加能力必须在这里显式开口子。
  */
+
+/** BattleClient.ini 单个关卡（campaign:load 返回载荷），Enabled=False = 未开放 */
+type CampaignMissionPayload = {
+  id: string; description: string; summary: string; scenario: string
+  side: number; sideName: string; longDescription: string
+  buildOffAlly: boolean; cd: number; finalMovie: string; enabled: boolean
+}
+
 const api = {
   window: {
     minimize: () => ipcRenderer.send('win:minimize'),
@@ -132,6 +140,12 @@ const api = {
     read: (gameId: string): Promise<Record<string, number>> => ipcRenderer.invoke('sound:read', gameId),
     write: (gameId: string, values: Record<string, number>): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('sound:write', gameId, values)
+  },
+  quality: {
+    // 画质档位：RA2MO.ini [Options] DetailLevel 0/1/2（低/中/高）
+    read: (gameId: string): Promise<number> => ipcRenderer.invoke('quality:read', gameId),
+    write: (gameId: string, level: number): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('quality:write', gameId, level)
   },
   modset: {
     list: (gameId: string): Promise<{ ok: boolean; modSets: Array<{ id: string; name: string; description: string; background?: string; packages: Array<{ id: string; name: string }> }>; error?: string }> =>
@@ -690,10 +704,10 @@ const api = {
       ipcRenderer.invoke('file-setting:check-availability', resourcesPath, files)
   },
   keyboard: {
-    load: (gamePath: string): Promise<Array<{
+    load: (gamePath: string, gameId?: string): Promise<Array<{
       command: string; uiName: string; category: string
       description: string; defaultKey: string; currentKey: string
-    }>> => ipcRenderer.invoke('keyboard:load', gamePath),
+    }>> => ipcRenderer.invoke('keyboard:load', gamePath, gameId),
     getMappings: (gamePath: string): Promise<Record<string, string>> =>
       ipcRenderer.invoke('keyboard:mappings', gamePath),
     save: (gamePath: string, bindings: Array<{ command: string; currentKey: string; defaultKey: string }>, gameId?: string): Promise<{ ok: boolean }> =>
@@ -706,17 +720,20 @@ const api = {
       ipcRenderer.invoke('integrity:missing-required', gamePath)
   },
   campaign: {
-    load: (gamePath: string): Promise<Array<{
-      name: string; label: string
-      acts: Array<{ id: string; label: string }>
-      missions: Array<{
-        id: string; actLabelId: string; missionIndex: number
-        description: string; summary: string; scenario: string
-        side: number; sideName: string; act: number
-        longDescription: string; buildOffAlly: boolean
-        cd: number; finalMovie: string
+    load: (gamePath: string): Promise<{
+      acts: Array<{
+        id: string; label: string
+        missions: CampaignMissionPayload[]
+        groups: Array<{
+          id: string; label: string
+          missions: CampaignMissionPayload[]
+        }>
       }>
-    }>> => ipcRenderer.invoke('campaign:load', gamePath)
+      standalone: Array<{
+        id: string; label: string
+        missions: CampaignMissionPayload[]
+      }>
+    }> => ipcRenderer.invoke('campaign:load', gamePath)
   },
   translation: {
     load: (filePath: string): Promise<{ name: string; culture: string; entries: Record<string, string> } | null> =>

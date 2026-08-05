@@ -3,18 +3,19 @@
  *
  * 思路：
  *   playground = 当前生效的游戏目录。点启动时按当前播放集重建：
- *   - 原版游戏文件 → 硬链接进 playground（省空间、不复制数据）
- *   - 播放集 MOD 文件 → 硬链接覆盖（MOD 优先，后链接覆盖先链接）
+ *   - 游戏本体包 MentalOmega（安装目录的完整拷贝）→ 硬链接进 playground
+ *   - 播放集其他 MOD 包 → 硬链接覆盖（后链接覆盖先链接）
  *   - 可写目录（存档/客户端数据等）→ junction 指向该播放集独立的存档目录，
- *     游戏新增/修改落在那儿，重建不丢、各播放集互不干扰
+ *     首次从本体包播种；游戏新增/修改落在那儿，重建不丢、各播放集互不干扰
  *   - 配置文件 → 复制到该播放集的 config 目录 + 硬链接，修改属于播放集
- *   游戏从 playground 运行（cwd、exe、spawn.ini 都指向它）。
+ *   游戏从 playground 运行（cwd、exe、spawn.ini 都指向它）。安装目录只作为本体包的来源。
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { app } from 'electron'
+import { ensureFullKeyboardMap } from './keyboard-reader'
 
 export interface PlaygroundApplyOptions {
   gameId: string
@@ -78,9 +79,7 @@ function isConfigFile(name: string): boolean {
 const GLOBAL_SETTINGS_REL = new Set([
   'ddraw.ini', // 画质：分辨率/窗口模式/渲染器（游戏根目录）
   'Resources/Renderers.ini', // 画质：渲染器列表
-  'KeyboardCommands.ini', // 快捷键（默认绑定）
-  'KeyboardMD.ini', // 快捷键（用户覆盖项）
-  'KEYBOARD.INI', // 快捷键（备用名）
+  'KeyboardMD.ini', // 快捷键（用户改键覆盖项，游戏只读这个；KeyboardCommands.ini 是游戏自带定义，不用管）
   'RA2MO.ini' // 音量/游戏设置（settingsFile）
 ])
 
@@ -105,7 +104,7 @@ async function readConfig(): Promise<Record<string, string>> {
   }
 }
 
-/** 从 game.ini 读 installPath */
+/** 从 game.ini 读 installPath（安装目录只作为本体包的源） */
 function readInstallPath(gameIniPath: string): string {
   try {
     const content = fs.readFileSync(gameIniPath, 'utf-8')
@@ -117,13 +116,26 @@ function readInstallPath(gameIniPath: string): string {
   return ''
 }
 
-function sameDrive(a: string, b: string): boolean {
-  // root 统一斜杠再比：path.parse 对正/反斜杠返回不同 root（"C:/" vs "C:\\"）
-  const ra = path.parse(a).root.toLowerCase().replace(/\\/g, '/')
-  const rb = path.parse(b).root.toLowerCase().replace(/\\/g, '/')
-  // UNC 路径（\\server\share → //server/share）：不同共享硬链接前置不成立
-  if (ra.startsWith('//') || rb.startsWith('//')) return false
-  return ra === rb
+/**
+ * 首次使用：本体包缺 KeyboardMD 等基础设置文件时，从安装目录抽一份进包。
+ * 安装目录只作包的源；抽完以后构建完全不碰安装目录。
+ */
+function ensurePackageBaseSettings(installPath: string, basePkgDir: string): void {
+  if (!installPath || !fs.existsSync(installPath)) return
+  const rels = ['KeyboardMD.ini', 'RA2MO.ini', 'ddraw.ini', 'Resources/Renderers.ini']
+  for (const rel of rels) {
+    const pkg = path.join(basePkgDir, rel)
+    const src = path.join(installPath, rel)
+    if (!fs.existsSync(pkg) && fs.existsSync(src)) {
+      try {
+        fs.mkdirSync(path.dirname(pkg), { recursive: true })
+        fs.copyFileSync(src, pkg)
+        console.log(`[playground] 首次使用：从安装目录抽取 ${rel} 进本体包`)
+      } catch (e) {
+        console.error(`[playground] 抽取 ${rel} 失败: ${(e as Error).message}`)
+      }
+    }
+  }
 }
 
 /** 递归统计文件数（跳过可写目录，与链接保持一致） */
@@ -333,13 +345,13 @@ function linkOriginal(
 
 /**
  * 全局设置（画质/快捷键/音量）→ 从 resourceDir/<gameId>/settings/ 硬链接进 playground。
- * 在包覆盖之后执行，启动器设置的设置文件优先于包自带。文件不存在时从安装目录播种（无则建空文件），
- * 保证游戏运行时的写入通过硬链接落回 settings/，重建不丢。
+ * 在包覆盖之后执行，启动器设置的设置文件优先于包自带。文件不存在时从本体包播种（无则建空文件）。
+ * 游戏运行时的写入通过硬链接落回 settings/，重建不丢。
  */
 function linkGlobalSettings(
   resourceDir: string,
   gameId: string,
-  installPath: string,
+  sourceDir: string,
   playground: string,
   stats: LinkStats
 ): void {
@@ -348,10 +360,10 @@ function linkGlobalSettings(
     const globalSrc = path.join(settingsRoot, rel)
     if (!fs.existsSync(globalSrc)) {
       fs.mkdirSync(path.dirname(globalSrc), { recursive: true })
-      const installSrc = path.join(installPath, rel)
+      const seedSrc = path.join(sourceDir, rel)
       try {
-        if (fs.existsSync(installSrc)) {
-          fs.copyFileSync(installSrc, globalSrc)
+        if (fs.existsSync(seedSrc)) {
+          fs.copyFileSync(seedSrc, globalSrc)
         } else {
           fs.writeFileSync(globalSrc, '', 'utf-8')
         }
@@ -413,16 +425,6 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     const resourceDir = config.resourceDir
     if (!resourceDir) return { ok: false, error: '请先在设置中选择资源目录' }
 
-    const gameIniPath = path.join(resourceDir, gameId, 'game.ini')
-    const installPath = readInstallPath(gameIniPath)
-    if (!installPath || !fs.existsSync(installPath)) {
-      return { ok: false, error: '找不到游戏安装目录' }
-    }
-
-    if (!sameDrive(resourceDir, installPath)) {
-      return { ok: false, error: '资源目录与游戏目录不在同一分区，无法硬链接' }
-    }
-
     const playground = path.join(resourceDir, gameId, 'playground')
     const saveRoot = path.join(resourceDir, gameId, 'saves', modSetId)
     const stats: LinkStats = { failed: 0, errors: [] }
@@ -433,19 +435,24 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     fs.mkdirSync(playground, { recursive: true })
     onProgress?.(8, '工作区已清理')
 
-    // 2. 原版基准（可写目录 junction 到该播放集的存档目录）
-    const total = countFiles(installPath)
+    // 2. 游戏本体包作基准（MentalOmega 是安装目录的完整静态副本；可写目录不含）
+    const basePkgDir = path.join(resourceDir, gameId, 'packages', 'MentalOmega')
+    if (!fs.existsSync(basePkgDir)) {
+      return { ok: false, error: '找不到游戏本体包 MentalOmega，请先在包管理中导入' }
+    }
+    const total = countFiles(basePkgDir)
     let done = 0
-    onProgress?.(10, '链接原版文件...')
-    linkOriginal(installPath, playground, saveRoot, stats, () => {
+    onProgress?.(10, '链接游戏本体包...')
+    linkOriginal(basePkgDir, playground, saveRoot, stats, () => {
       done++
       if (total > 0 && (done % 300 === 0 || done === total)) {
         const pct = 10 + Math.round((done / total) * 60)
-        onProgress?.(Math.min(pct, 70), '链接原版文件...')
+        onProgress?.(Math.min(pct, 70), '链接游戏本体包...')
       }
     })
 
-    // 3. 包覆盖（按播放集顺序，后覆盖胜出）
+    // 3. 其余包覆盖（按播放集顺序，后覆盖胜出；MentalOmega 再次链接是幂等跳过）
+    //    可写目录已在 linkOriginal 里按「本体包真实存在的目录」junction，不硬造其它游戏的可写目录
     const packageNames = await getPlaySetPackageNames(resourceDir, gameId, modSetId)
     if (packageNames.length > 0) {
       onProgress?.(72, '链接包文件...')
@@ -458,7 +465,11 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     }
 
     // 4. 全局设置（画质/快捷键/音量）→ 从 settings/ 硬链接（包覆盖之后，启动器设置优先）
-    linkGlobalSettings(resourceDir, gameId, installPath, playground, stats)
+    // 首次使用：本体包缺 KeyboardMD 等基础设置文件时，从安装目录抽一份进包（安装目录只是包的源）
+    ensurePackageBaseSettings(readInstallPath(path.join(resourceDir, gameId, 'game.ini')), basePkgDir)
+    // 快捷键键位表要全量（游戏直接读 KeyboardMD.ini）：先播种完整键位，再硬链接进游戏目录
+    ensureFullKeyboardMap(basePkgDir, path.join(resourceDir, gameId, 'settings'))
+    linkGlobalSettings(resourceDir, gameId, basePkgDir, playground, stats)
 
     // 5. 链接失败必须上报，不能「缺文件还返回成功」
     if (stats.failed > 0) {

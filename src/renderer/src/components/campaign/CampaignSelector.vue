@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import type { Mission, Difficulty } from '@renderer/types/campaign'
 import { DIFFICULTY_LABELS } from '@renderer/types/campaign'
 import { useCampaign } from '@renderer/composables/useCampaign'
@@ -10,10 +10,10 @@ const props = defineProps<{
 }>()
 
 const {
-  config, selectedBranch, selectedMission, difficulty,
+  config, selectedLine, selectedMission, selectedMissionSection, difficulty,
   campaignProgress, completedCount, totalMissions,
-  selectBranch, selectMission, setDifficulty,
-  isMissionCompleted, isMissionLocked, getSideName,
+  allLines, selectLine, selectMission, setDifficulty,
+  isMissionUnavailable,
   launchMission
 } = useCampaign()
 
@@ -22,13 +22,18 @@ const launchError = ref('')
 
 const difficulties: Difficulty[] = ['easy', 'medium', 'hard']
 
-// 默认选中第一条战役线
-if (config.value && config.value.branches.length > 0 && !selectedBranch.value) {
-  selectBranch(config.value.branches[0].id)
+/** 某条战役线可玩关卡数（未开放的计为锁定） */
+function linePlayableCount(line: { sections: Array<{ missions: Mission[] }> }): number {
+  return line.sections.reduce((n, s) => n + s.missions.filter((m) => m.enabled !== false).length, 0)
+}
+
+function lineTotalCount(line: { sections: Array<{ missions: Mission[] }> }): number {
+  return line.sections.reduce((n, s) => n + s.missions.length, 0)
 }
 
 async function handleLaunch(): Promise<void> {
   if (!selectedMission.value || launching.value) return
+  if (isMissionUnavailable(selectedMission.value)) return
   launching.value = true
   launchError.value = ''
   const result = await launchMission(selectedMission.value, difficulty.value, props.gameDir, props.exe)
@@ -38,12 +43,12 @@ async function handleLaunch(): Promise<void> {
   launching.value = false
 }
 
-function missionStatus(m: Mission): string {
-  if (!selectedBranch.value) return ''
-  if (isMissionLocked(m, selectedBranch.value)) return 'locked'
-  if (isMissionCompleted(m.codeName)) return 'completed'
-  return 'available'
-}
+/** 选中战役线是否全部未开放（右栏提示用） */
+const selectedLineAllLocked = computed(() => {
+  if (!selectedLine.value) return false
+  const all = selectedLine.value.sections.flatMap((s) => s.missions)
+  return all.length > 0 && all.every((m) => m.enabled === false)
+})
 </script>
 
 <template>
@@ -70,21 +75,28 @@ function missionStatus(m: Mission): string {
 
       <!-- 主体：左中右三栏 -->
       <div class="flex min-h-0 flex-1">
-        <!-- 左栏：战役线选择（宽度随窗口按比例放宽，min 保证可读） -->
-        <div class="flex w-[25%] min-w-[150px] shrink-0 flex-col border-r border-line bg-panel/50">
+        <!-- 左栏：战役线（只列战役线本身，子分割放中间列表） -->
+        <div class="flex w-[28%] min-w-[170px] shrink-0 flex-col border-r border-line bg-panel/50">
           <p class="px-3 pb-1 pt-3 text-[11px] font-bold uppercase text-fg-dim">战役线</p>
           <div class="flex-1 overflow-y-auto px-2 pb-2">
             <button
-              v-for="branch in config.branches"
-              :key="branch.id"
+              v-for="line in allLines"
+              :key="line.key"
               class="mb-1 flex w-full items-center gap-2 rounded px-3 py-2 text-left text-[13px] transition-colors"
-              :class="selectedBranch?.id === branch.id
+              :class="selectedLine?.key === line.key
                 ? 'bg-accent/20 text-accent'
                 : 'text-fg hover:bg-panel-alt'"
-              @click="selectBranch(branch.id)"
+              @click="selectLine(line.key)"
             >
-              <span class="truncate">{{ branch.name }}</span>
+              <span class="truncate">{{ line.label }}</span>
+              <span
+                v-if="linePlayableCount(line) < lineTotalCount(line)"
+                class="ml-auto shrink-0 text-[10px] text-fg-dim"
+              >
+                {{ linePlayableCount(line) }}/{{ lineTotalCount(line) }}
+              </span>
             </button>
+            <p v-if="allLines.length === 0" class="px-3 pt-4 text-[12px] text-fg-dim">没有可显示的战役</p>
           </div>
           <!-- 难度选择 -->
           <div class="border-t border-line px-3 py-2">
@@ -105,35 +117,41 @@ function missionStatus(m: Mission): string {
           </div>
         </div>
 
-        <!-- 中栏：关卡列表（宽度随窗口按比例放宽） -->
-        <div class="flex w-[25%] min-w-[200px] shrink-0 flex-col border-r border-line">
+        <!-- 中栏：关卡列表（子分割在这里分段显示） -->
+        <div class="flex w-[32%] min-w-[230px] shrink-0 flex-col border-r border-line">
           <p class="px-4 pb-1 pt-3 text-[11px] font-bold uppercase text-fg-dim">
-            {{ selectedBranch?.name ?? '选择战役线' }}
+            {{ selectedLine?.label ?? '选择战役线' }}
           </p>
           <div class="flex-1 overflow-y-auto px-2 pb-2">
-            <div v-if="selectedBranch">
-              <button
-                v-for="(m, idx) in selectedBranch.missions"
-                :key="m.codeName"
-                class="mb-1 flex w-full items-center gap-2 rounded px-3 py-2 text-left transition-colors"
-                :class="[
-                  selectedMission?.codeName === m.codeName
-                    ? 'bg-accent/20 text-accent'
-                    : missionStatus(m) === 'locked'
-                      ? 'text-fg-dim/50'
-                      : 'text-fg hover:bg-panel-alt'
-                ]"
-                :disabled="missionStatus(m) === 'locked'"
-                @click="selectMission(m.codeName)"
-              >
-                <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-panel-alt text-[11px] text-fg-dim">
-                  {{ idx + 1 }}
-                </span>
-                <span class="truncate text-[13px]">{{ m.name }}</span>
-                <span v-if="isMissionCompleted(m.codeName)" class="ml-auto text-[11px] text-green-500">&#10003;</span>
-                <span v-else-if="missionStatus(m) === 'locked'" class="ml-auto text-[11px] text-fg-dim/50">&#128274;</span>
-              </button>
-            </div>
+            <template v-if="selectedLine">
+              <template v-for="(sec, si) in selectedLine.sections" :key="si">
+                <!-- 子分割标题（如"欧洲联盟"） -->
+                <p v-if="sec.header" class="px-2 pb-0.5 pt-3 text-[11px] font-bold text-fg-dim/80">
+                  {{ sec.header }}
+                </p>
+                <button
+                  v-for="(m, idx) in sec.missions"
+                  :key="m.codeName"
+                  class="mb-1 flex w-full items-center gap-2 rounded px-3 py-2 text-left transition-colors"
+                  :class="[
+                    isMissionUnavailable(m)
+                      ? 'cursor-not-allowed text-fg-dim/40'
+                      : selectedMission?.codeName === m.codeName
+                        ? 'bg-accent/20 text-accent'
+                        : 'text-fg hover:bg-panel-alt'
+                  ]"
+                  :disabled="isMissionUnavailable(m)"
+                  @click="selectMission(m.codeName)"
+                >
+                  <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-panel-alt text-[11px] text-fg-dim">
+                    {{ idx + 1 }}
+                  </span>
+                  <span class="truncate text-[13px]">{{ m.name }}</span>
+                  <span v-if="isMissionUnavailable(m)" class="ml-auto shrink-0 text-[10px] text-fg-dim/60">🔒 未开放</span>
+                </button>
+              </template>
+              <p v-if="selectedLine.sections.every((s) => s.missions.length === 0)" class="px-3 pt-4 text-[12px] text-fg-dim">该战役线没有关卡</p>
+            </template>
             <p v-else class="px-3 pt-4 text-[13px] text-fg-dim">请先选择一条战役线</p>
           </div>
         </div>
@@ -144,15 +162,16 @@ function missionStatus(m: Mission): string {
             <div class="flex h-[180px] shrink-0 items-center justify-center border-b border-line bg-panel/30">
               <div class="text-center">
                 <p class="text-[16px] font-bold text-fg">{{ selectedMission.name }}</p>
-                <p class="mt-1 text-[12px] text-fg-dim">{{ getSideName(selectedMission.sideId) }}</p>
+                <p class="mt-1 text-[12px] text-fg-dim">
+                  {{ selectedMissionSection?.header ?? selectedLine?.label }}
+                </p>
               </div>
             </div>
             <div class="flex-1 overflow-y-auto px-4 py-3">
               <p class="mb-3 whitespace-pre-line text-[13px] leading-relaxed text-fg">{{ selectedMission.description }}</p>
               <div class="space-y-1.5 text-[12px] text-fg-dim">
-                <p>势力：{{ getSideName(selectedMission.sideId) }}</p>
+                <p>势力：{{ selectedMissionSection?.header ?? selectedLine?.label }}</p>
                 <p>地图：{{ selectedMission.scenario }}</p>
-                <p v-if="isMissionCompleted(selectedMission.codeName)" class="text-green-500">&#10003; 已通关</p>
               </div>
             </div>
             <div class="shrink-0 border-t border-line px-4 py-3">
@@ -166,8 +185,13 @@ function missionStatus(m: Mission): string {
               </button>
             </div>
           </template>
-          <div v-else class="flex flex-1 items-center justify-center">
-            <p class="text-[13px] text-fg-dim">选择一个关卡查看详情</p>
+          <div v-else class="flex flex-1 flex-col items-center justify-center gap-2">
+            <p class="text-[13px] text-fg-dim">
+              {{ selectedLineAllLocked ? '该战役线关卡均未开放' : '选择一个关卡查看详情' }}
+            </p>
+            <p v-if="selectedLineAllLocked" class="max-w-[280px] text-center text-[11px] text-fg-dim/60">
+              这些关卡在 BattleClient.ini 中标记为 Enabled=False，暂未开放。
+            </p>
           </div>
         </div>
       </div>

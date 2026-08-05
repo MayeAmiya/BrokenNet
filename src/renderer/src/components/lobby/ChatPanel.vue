@@ -7,16 +7,33 @@ const props = defineProps<{
   messages: ChatMessage[]
   hasRoom: boolean
   chatColor?: string
+  nickname?: string
 }>()
 
 const emit = defineEmits<{
   send: [content: string]
   'update-color': [color: string]
+  'update-nickname': [name: string]
 }>()
 
 const chatInput = ref('')
 const chatScrollRef = ref<HTMLDivElement>()
 const selectedColor = ref(props.chatColor ?? CHAT_COLORS[0].value)
+const nicknameDraft = ref(props.nickname ?? '')
+
+watch(() => props.nickname, (v) => {
+  nicknameDraft.value = v ?? ''
+})
+
+/** 昵称输入框回车/失焦时保存 */
+function commitNickname(): void {
+  const n = nicknameDraft.value.trim()
+  if (n && n !== props.nickname) {
+    emit('update-nickname', n)
+  } else {
+    nicknameDraft.value = props.nickname ?? ''
+  }
+}
 
 function formatTime(ts: number): string {
   const d = new Date(ts)
@@ -41,7 +58,7 @@ watch(selectedColor, (c) => emit('update-color', c))
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
-    <!-- 颜色选择 -->
+    <!-- 颜色选择 + 在线昵称 -->
     <div class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1">
       <span class="text-[11px] text-fg-dim">聊天颜色:</span>
       <select
@@ -50,6 +67,15 @@ watch(selectedColor, (c) => emit('update-color', c))
       >
         <option v-for="c in CHAT_COLORS" :key="c.value" :value="c.value">{{ c.name }}</option>
       </select>
+      <span class="ml-1 text-[11px] text-fg-dim">昵称:</span>
+      <input
+        v-model="nicknameDraft"
+        maxlength="24"
+        class="w-32 border border-line bg-bg px-1 py-0.5 text-[11px] text-fg outline-none focus:border-accent"
+        title="回车或失焦保存"
+        @keyup.enter="commitNickname"
+        @blur="commitNickname"
+      />
     </div>
 
     <!-- 消息列表 -->

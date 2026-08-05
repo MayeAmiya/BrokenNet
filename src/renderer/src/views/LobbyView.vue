@@ -7,6 +7,13 @@ import ChatPanel from '@renderer/components/lobby/ChatPanel.vue'
 import RoomDetail from '@renderer/components/lobby/RoomDetail.vue'
 import CreateRoomModal from '@renderer/components/lobby/CreateRoomModal.vue'
 import PasswordModal from '@renderer/components/lobby/PasswordModal.vue'
+import { useNickname } from '@renderer/composables/useNickname'
+
+// 在线昵称（全局，与账户页共用；在聊天栏旁边编辑）
+const { nickname: onlineNickname, loadNickname, setNickname } = useNickname()
+async function saveNickname(name: string): Promise<void> {
+  await setNickname(name)
+}
 
 const props = defineProps<{
   gameId: string
@@ -17,7 +24,7 @@ const props = defineProps<{
 const emit = defineEmits<{ back: []; 'update:current-mod-set-id': [id: string] }>()
 
 // 大厅里切换播放集要同步到 useLobby 的 currentModSetId（clientLaunch/hostLaunch 用它建 playground）
-import { currentModSetId as lobbyCurrentModSetId, currentPlaygroundPath } from '@renderer/composables/lobby-state'
+import { currentModSetId as lobbyCurrentModSetId, currentPlaygroundPath, playgroundRevision } from '@renderer/composables/lobby-state'
 watch(() => props.currentModSetId, (id) => {
   if (id) lobbyCurrentModSetId.value = id
 })
@@ -26,8 +33,8 @@ function selectLobbyModSet(id: string): void {
   modSetDropdownOpen.value = false
   emit('update:current-mod-set-id', id)
 }
-// 播放集切换后 playground 重建完成（currentPlaygroundPath 变化）→ 重读地图/模式/选项数据
-watch(currentPlaygroundPath, () => {
+// 播放集切换后 playground 重建完成（版本号递增）→ 重读地图/模式/选项数据
+watch(playgroundRevision, () => {
   if (!props.gamePath && !currentPlaygroundPath.value) return
   void loadRealData(currentPlaygroundPath.value || props.gamePath || '', props.gameId)
 })
@@ -252,6 +259,7 @@ watch(() => props.gameId, (newId, oldId) => {
 
 onMounted(async () => {
   window.addEventListener('click', onWindowClick)
+  await loadNickname()
   connectCncnet(props.gamePath, props.gameId, props.currentModSetId)
   // 切回 tab 时房间数据已在（cleanup 保留 rooms，监听持续），不重复刷新；
   // 仅当房间为空（首次进入）才加载
@@ -466,7 +474,7 @@ function onBack(): void {
           </template>
         </div>
 
-        <ChatPanel :messages="currentMessages" :has-room="hasRoom" :chat-color="selectedChatColor" @send="sendMessage" @update-color="(c) => { selectedChatColor = c; setChatColor(c) }" />
+        <ChatPanel :messages="currentMessages" :has-room="hasRoom" :chat-color="selectedChatColor" :nickname="onlineNickname" @send="sendMessage" @update-color="(c) => { selectedChatColor = c; setChatColor(c) }" @update-nickname="saveNickname" />
       </div>
     </div>
 

@@ -4,9 +4,8 @@ import type { GameProfile } from '@renderer/types/profile'
 import type { RepoMod, ModManifest } from '@renderer/types/mod'
 import type { IniRendererDef, IniGameCheckBoxOption, IniGameDropDownOption } from '@renderer/types/ini-layout'
 import { useToast } from '@renderer/composables/useToast'
-import { currentPlaygroundPath } from '@renderer/composables/lobby-state'
+import { currentPlaygroundPath, playgroundRevision } from '@renderer/composables/lobby-state'
 import { useGameConfig } from '@renderer/composables/useGameConfig'
-import { useNickname } from '@renderer/composables/useNickname'
 import { computeLaunchGameOptions } from '@renderer/composables/gameOptions'
 import LobbyView from './LobbyView.vue'
 import CampaignSelector from '@renderer/components/campaign/CampaignSelector.vue'
@@ -628,8 +627,6 @@ function handleDropdownClickOutside(e: MouseEvent): void {
 onMounted(async () => {
   document.addEventListener('click', handleDropdownClickOutside)
   resourceDir.value = (await window.api.fs.getConfig('resourceDir')) ?? ''
-  await loadNickname()
-  nicknameInput.value = onlineNickname.value
   await loadInstalledMods()
   // 确保默认"原版"播放集存在（游戏本体视为包），再加载播放集
   await window.api.modset.ensureDefault(props.profile.id)
@@ -650,10 +647,10 @@ watch(selectedModSetId, (id) => {
   }
 })
 
-// 切换播放集重建 playground 完成（路径变化）→ 单人战役从新 playground 重新加载
-watch(currentPlaygroundPath, (path) => {
-  if (path && props.profile.installPath) {
-    loadCampaignData(selectedModSetId.value, props.profile.id, path)
+// 切换播放集重建 playground 完成（版本号递增）→ 单人战役从新 playground 重新加载
+watch(playgroundRevision, () => {
+  if (currentPlaygroundPath.value && props.profile.installPath) {
+    loadCampaignData(selectedModSetId.value, props.profile.id, currentPlaygroundPath.value)
   }
 })
 
@@ -693,7 +690,8 @@ async function rebuildPlayground(modSetId: string): Promise<void> {
     console.log('[GameView] playground.apply 结果:', JSON.stringify({ ok: res.ok, path: res.playgroundPath, error: res.error }))
     if (res.ok && res.playgroundPath) {
       currentPlaygroundPath.value = res.playgroundPath
-      console.log('[GameView] playground 已重建:', res.playgroundPath, 'modSet:', modSetId)
+      playgroundRevision.value++ // 路径固定，重建成功用版本号通知大厅/战役重载
+      console.log('[GameView] playground 已重建:', res.playgroundPath, 'modSet:', modSetId, 'rev:', playgroundRevision.value)
     }
   } catch (e) {
     console.error('[GameView] playground 重建失败:', e)
@@ -937,6 +935,13 @@ const moRendererKey = ref('')
 const moResolution = ref('1920×1080')
 const moWindowMode = ref<'fullscreen' | 'windowed' | 'borderless'>('fullscreen')
 const moPrevRendererKey = ref('')
+// 画质档位：RA2MO.ini [Options] DetailLevel，0=低 1=中 2=高
+const moDetailLevel = ref(1)
+const MO_DETAIL_LEVELS = [
+  { value: 0, label: '低' },
+  { value: 1, label: '中' },
+  { value: 2, label: '高' }
+]
 
 // 判断游戏类型
 function getGameType(): 'zh' | 'gen' {
@@ -977,6 +982,11 @@ async function loadGraphicsSettings(): Promise<void> {
           }
         }
       }
+
+      // 画质档位：settings/RA2MO.ini [Options] DetailLevel
+      try {
+        moDetailLevel.value = await window.api.quality.read(props.profile.id)
+      } catch { /* 读不到用默认 */ }
       return
     }
 
@@ -1053,6 +1063,9 @@ async function saveGraphicsSettings(): Promise<void> {
       // 持久化渲染器选择
       await window.api.fs.setConfig(`mo_renderer_${props.profile.id}`, moRendererKey.value)
       moPrevRendererKey.value = moRendererKey.value
+
+      // 画质档位：settings/RA2MO.ini [Options] DetailLevel
+      await window.api.quality.write(props.profile.id, moDetailLevel.value)
     } else {
       // ===== 绝命时刻：写入 Options.ini =====
       const gameType = getGameType()
@@ -1064,8 +1077,6 @@ async function saveGraphicsSettings(): Promise<void> {
       }
       await window.api.options.write(gameType, options)
     }
-
-    toastSuccess('画质设置已保存')
   } finally {
     graphicsSaving.value = false
   }
@@ -1087,9 +1098,8 @@ watch(activeTab, (tab) => {
 const soundValues = ref<Record<string, number>>({})
 const soundLoading = ref(false)
 const soundSliders = [
-  { key: 'Volume', label: '音效' },
+  { key: 'SoundVolume', label: '音效' },
   { key: 'ScoreVolume', label: '音乐' },
-  { key: 'SpeechVolume', label: '语音' },
   { key: 'VoiceVolume', label: '单位语音' }
 ]
 
@@ -1106,14 +1116,26 @@ async function saveSoundSettings(): Promise<void> {
   // 深克隆（Vue 响应式 Proxy 不能过 IPC structured-clone）
   const plain = JSON.parse(JSON.stringify(soundValues.value))
   const result = await window.api.sound.write(props.profile.id, plain)
-  if (result.ok) {
-    toastSuccess('音量设置已保存')
-  } else {
+  if (!result.ok) {
     toastError(result.error ?? '保存失败')
   }
 }
 
+/** 统一保存：画质 + 音量（设置页只留一个保存按钮） */
+async function saveAllSettings(): Promise<void> {
+  await saveGraphicsSettings()
+  await saveSoundSettings()
+  toastSuccess('设置已保存')
+}
+
+/** 统一重新加载：画质 + 音量 */
+async function reloadAllSettings(): Promise<void> {
+  await loadGraphicsSettings()
+  await loadSoundSettings()
+}
+
 // ==================== 快捷键设置 ====================
+// 游戏只读 KeyboardMD.ini（用户改键覆盖项），定义来自游戏自带的 KeyboardCommands.ini（静态只读）
 
 interface KeyboardBindingItem {
   command: string
@@ -1136,7 +1158,7 @@ async function loadKeyboardBindings(): Promise<void> {
   editingCommand.value = null
   captureMsg.value = ''
   try {
-    const result = await window.api.keyboard.load(props.profile.installPath)
+    const result = await window.api.keyboard.load(props.profile.installPath, props.profile.id)
     keyboardBindings.value = result
   } finally {
     keyboardLoading.value = false
@@ -1376,26 +1398,6 @@ watch(editingCommand, (cmd) => {
     window.removeEventListener('keydown', onCaptureKeydown, true)
   }
 })
-
-// 在线昵称（全局，与账户页/联机大厅共用）
-const {
-  nickname: onlineNickname,
-  loadNickname,
-  setNickname: saveOnlineNickname
-} = useNickname()
-const nicknameInput = ref('')
-const nicknameSaving = ref(false)
-
-async function onSaveNickname(): Promise<void> {
-  if (!nicknameInput.value.trim()) return
-  nicknameSaving.value = true
-  try {
-    await saveOnlineNickname(nicknameInput.value.trim())
-    toastSuccess('在线昵称已保存')
-  } finally {
-    nicknameSaving.value = false
-  }
-}
 
 // 游戏设置函数
 async function selectGtdPath(): Promise<void> {
@@ -2462,289 +2464,214 @@ async function run(key: string): Promise<void> {
     <!-- 游戏设置 -->
     <div v-else-if="activeTab === 'settings'" class="flex flex-1 flex-col overflow-hidden px-6 py-5">
       <div class="flex-1 overflow-y-auto">
-      <h2 class="mb-4 text-[15px] font-medium text-fg">游戏设置</h2>
-
-      <div class="max-w-[520px] space-y-4">
-        <div>
-          <label class="mb-1 block text-[12px] text-fg-dim">游戏名称</label>
-          <div class="border border-line bg-panel px-3 py-2 text-[13px]">{{ profile.name }}</div>
-        </div>
-
-        <div>
-          <label class="mb-1 block text-[12px] text-fg-dim">{{ isMentalOmega ? '心灵终结安装目录' : '绝命时刻安装目录' }}</label>
-          <div class="border border-line bg-panel px-3 py-2 text-[13px]">{{ profile.installPath }}</div>
-        </div>
-
-        <!-- 在线昵称（联机大厅使用的名称，全局生效） -->
-        <div class="rounded border border-line p-4">
-          <div class="mb-1 flex items-center justify-between">
-            <label class="text-[12px] text-fg-dim">在线昵称</label>
-            <span class="text-[11px] text-fg-dim/60">多人游戏大厅中显示</span>
-          </div>
+        <div class="mb-4 flex items-center justify-between">
+          <h2 class="text-[15px] font-medium text-fg">游戏设置</h2>
           <div class="flex gap-2">
-            <input
-              v-model="nicknameInput"
-              type="text"
-              placeholder="请输入昵称"
-              class="flex-1 border border-line bg-panel px-3 py-1.5 text-[13px] outline-none focus:border-accent"
-              @keyup.enter="onSaveNickname"
-            />
             <button
-              class="shrink-0 bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi disabled:opacity-40"
-              :disabled="nicknameSaving || !nicknameInput.trim()"
-              @click="onSaveNickname"
+              class="border border-line px-3 py-1.5 text-[12px] text-fg-dim hover:text-fg"
+              :disabled="graphicsLoading || soundLoading"
+              @click="reloadAllSettings"
             >
-              {{ nicknameSaving ? '保存中...' : '保存' }}
+              重新加载
+            </button>
+            <button
+              class="bg-accent px-3 py-1.5 text-[12px] text-white hover:bg-accent-hi disabled:opacity-50"
+              :disabled="graphicsLoading || graphicsSaving || soundLoading"
+              @click="saveAllSettings"
+            >
+              {{ graphicsSaving ? '保存中...' : '保存' }}
             </button>
           </div>
         </div>
 
-        <!-- 绝命时刻专属设置 -->
-        <template v-if="!isMentalOmega">
-          <div v-if="profile.generalsPath">
-            <label class="mb-1 block text-[12px] text-fg-dim">Generals 目录</label>
-            <div class="border border-line bg-panel px-3 py-2 text-[13px]">{{ profile.generalsPath }}</div>
-          </div>
+        <div class="max-w-[900px] space-y-6">
+          <!-- 绝命时刻：启动设置 -->
+          <section v-if="!isMentalOmega" class="rounded border border-line bg-panel p-4">
+            <h3 class="mb-4 text-[13px] font-medium text-fg">启动设置</h3>
+            <div class="space-y-4">
+              <div v-if="profile.generalsPath">
+                <label class="mb-1 block text-[12px] text-fg-dim">Generals 目录</label>
+                <div class="border border-line bg-bg px-3 py-2 text-[13px]">{{ profile.generalsPath }}</div>
+              </div>
 
-          <!-- 启用 GeneralsTD 复选框 -->
-          <div class="flex items-center gap-2">
-            <input
-              id="use-gtd"
-              v-model="useGtd"
-              type="checkbox"
-              class="h-4 w-4 accent-accent"
-            />
-            <label for="use-gtd" class="text-[13px] text-fg">启用 GeneralsTD 引擎</label>
-            <span v-if="useGtd && useGenTool" class="text-[11px] text-fg-dim">（GenTool 已自动禁用）</span>
-          </div>
+              <div class="flex items-center gap-2">
+                <input id="use-gtd" v-model="useGtd" type="checkbox" class="h-4 w-4 accent-accent" />
+                <label for="use-gtd" class="text-[13px] text-fg">启用 GeneralsTD 引擎</label>
+                <span v-if="useGtd && useGenTool" class="text-[11px] text-fg-dim">（GenTool 已自动禁用）</span>
+              </div>
 
-          <!-- GeneralsTD 目录（选中后显示） -->
-          <div v-if="useGtd">
-            <label class="mb-1 block text-[12px] text-fg-dim">GeneralsTD 目录</label>
-            <div class="flex gap-2">
-              <div class="flex-1 border border-line bg-panel px-3 py-2 text-[13px]">{{ gtdPath || '未设置' }}</div>
-              <button
-                class="shrink-0 border border-line px-3 py-2 text-[13px] text-fg-dim hover:border-accent hover:text-fg"
-                @click="selectGtdPath"
-              >
-                浏览
-              </button>
-            </div>
-          </div>
+              <div v-if="useGtd">
+                <label class="mb-1 block text-[12px] text-fg-dim">GeneralsTD 目录</label>
+                <div class="flex gap-2">
+                  <div class="flex-1 border border-line bg-bg px-3 py-2 text-[13px]">{{ gtdPath || '未设置' }}</div>
+                  <button
+                    class="shrink-0 border border-line px-3 py-2 text-[13px] text-fg-dim hover:border-accent hover:text-fg"
+                    @click="selectGtdPath"
+                  >
+                    浏览
+                  </button>
+                </div>
+              </div>
 
-          <!-- 启用 GenTool 复选框 -->
-          <div class="flex items-center gap-2">
-            <input
-              id="use-gentool"
-              v-model="useGenTool"
-              type="checkbox"
-              class="h-4 w-4 accent-accent"
-              :disabled="useGtd"
-            />
-            <label for="use-gentool" class="text-[13px] text-fg">启用 GenTool</label>
-            <span v-if="useGtd" class="text-[11px] text-fg-dim">（启用 GeneralsTD 时无效）</span>
-          </div>
-        </template>
-      </div>
-
-        <!-- 画质设置（已合并进游戏设置） -->
-        <div class="mt-8 max-w-[600px]">
-          <div class="mb-4 flex items-center justify-between">
-            <h3 class="text-[15px] font-medium text-fg">画质设置</h3>
-            <div class="flex gap-2">
-              <button
-                class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
-                :disabled="graphicsLoading"
-                @click="loadGraphicsSettings"
-              >
-                重新加载
-              </button>
-              <button
-                class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi disabled:opacity-50"
-                :disabled="graphicsLoading || graphicsSaving"
-                @click="saveGraphicsSettings"
-              >
-                {{ graphicsSaving ? '保存中...' : '保存' }}
-              </button>
-            </div>
-          </div>
-
-          <div v-if="graphicsLoading" class="flex items-center justify-center py-8">
-            <p class="text-[13px] text-fg-dim">加载中...</p>
-          </div>
-
-          <template v-else>
-            <!-- 心灵终结：渲染补丁设置 -->
-            <template v-if="isMentalOmega">
-<div class="max-w-[600px] space-y-6">
-            <!-- 渲染补丁 -->
-            <div>
-              <label class="mb-1 block text-[12px] text-fg-dim">渲染补丁</label>
-              <select
-                v-model="moRendererKey"
-                class="w-full border border-line bg-panel px-3 py-2 text-[13px] text-fg"
-              >
-                <option v-if="iniRendererList.length === 0" value="">默认</option>
-                <option
-                  v-for="r in iniRendererList"
-                  :key="r.value"
-                  :value="r.value"
-                >
-                  {{ r.label }}
-                </option>
-              </select>
-              <p class="mt-1 text-[11px] text-fg-dim">选择渲染补丁后将复制对应 DLL 到游戏目录</p>
-            </div>
-
-            <!-- 分辨率 -->
-            <div>
-              <label class="mb-1 block text-[12px] text-fg-dim">分辨率</label>
-              <select
-                v-model="moResolution"
-                class="w-full border border-line bg-panel px-3 py-2 text-[13px] text-fg"
-              >
-                <option v-for="res in MO_RESOLUTION_LIST" :key="res" :value="res">{{ res }}</option>
-              </select>
-            </div>
-
-            <!-- 窗口模式 -->
-            <div>
-              <label class="mb-2 block text-[12px] text-fg-dim">窗口模式</label>
-              <div class="space-y-2">
-                <label class="flex items-center gap-2 text-[13px]">
-                  <input v-model="moWindowMode" type="radio" value="fullscreen" class="accent-accent" />
-                  <span class="text-fg">全屏</span>
-                </label>
-                <label class="flex items-center gap-2 text-[13px]">
-                  <input v-model="moWindowMode" type="radio" value="windowed" class="accent-accent" />
-                  <span class="text-fg">窗口化</span>
-                </label>
-                <label class="flex items-center gap-2 text-[13px]">
-                  <input v-model="moWindowMode" type="radio" value="borderless" class="accent-accent" />
-                  <span class="text-fg">无边框窗口化</span>
-                </label>
+              <div class="flex items-center gap-2">
+                <input id="use-gentool" v-model="useGenTool" type="checkbox" class="h-4 w-4 accent-accent" :disabled="useGtd" />
+                <label for="use-gentool" class="text-[13px] text-fg">启用 GenTool</label>
+                <span v-if="useGtd" class="text-[11px] text-fg-dim">（启用 GeneralsTD 时无效）</span>
               </div>
             </div>
-          </div>
-            </template>
-            <!-- 绝命时刻：Options.ini 设置 -->
+          </section>
+
+          <!-- 画质设置（左）+ 音量设置（右）并列 -->
+          <div class="flex flex-col gap-4 lg:flex-row lg:items-start">
+          <section class="w-full shrink-0 rounded border border-line bg-panel p-4 lg:w-[380px]">
+            <h3 class="mb-4 text-[13px] font-medium text-fg">画质设置</h3>
+
+            <div v-if="graphicsLoading" class="flex items-center justify-center py-8">
+              <p class="text-[13px] text-fg-dim">加载中...</p>
+            </div>
+
             <template v-else>
-<div class="max-w-[600px] space-y-6">
-          <!-- 分辨率 -->
-          <div>
-            <label class="mb-1 block text-[12px] text-fg-dim">分辨率</label>
-            <select
-              v-model="resolution"
-              class="w-full border border-line bg-panel px-3 py-2 text-[13px] text-fg"
-            >
-              <option v-for="res in resolutionList" :key="res" :value="res">{{ res }}</option>
-            </select>
-          </div>
+              <!-- 心灵终结 -->
+              <div v-if="isMentalOmega" class="space-y-4">
+                <div>
+                  <label class="mb-1 block text-[12px] text-fg-dim">渲染补丁</label>
+                  <select
+                    v-model="moRendererKey"
+                    class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg"
+                  >
+                    <option v-if="iniRendererList.length === 0" value="">默认</option>
+                    <option v-for="r in iniRendererList" :key="r.value" :value="r.value">{{ r.label }}</option>
+                  </select>
+                  <p class="mt-1 text-[11px] text-fg-dim">选择渲染补丁后将复制对应 DLL 到游戏目录</p>
+                </div>
 
-          <!-- 窗口化模式 -->
-          <div>
-            <label class="mb-2 block text-[12px] text-fg-dim">窗口模式</label>
-            <div class="space-y-2">
-              <label class="flex items-center gap-2 text-[13px]">
-                <input v-model="windowMode" type="radio" value="fullscreen" class="accent-accent" />
-                <span class="text-fg">全屏</span>
-              </label>
-              <label class="flex items-center gap-2 text-[13px]">
-                <input v-model="windowMode" type="radio" value="windowed" class="accent-accent" />
-                <span class="text-fg">窗口化</span>
-              </label>
-              <label class="flex items-center gap-2 text-[13px]">
-                <input v-model="windowMode" type="radio" value="borderless" class="accent-accent" />
-                <span class="text-fg">无边框窗口化</span>
-              </label>
-            </div>
-          </div>
+                <div>
+                  <label class="mb-1 block text-[12px] text-fg-dim">分辨率</label>
+                  <select v-model="moResolution" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg">
+                    <option v-for="res in MO_RESOLUTION_LIST" :key="res" :value="res">{{ res }}</option>
+                  </select>
+                </div>
 
-          <!-- 渲染器 -->
-          <div>
-            <label class="mb-1 block text-[12px] text-fg-dim">渲染器</label>
-            <select
-              v-model="renderer"
-              class="w-full border border-line bg-panel px-3 py-2 text-[13px] text-fg"
-            >
-              <option v-if="iniRendererList.length === 0" value="default">默认</option>
-              <option
-                v-for="r in iniRendererList"
-                :key="r.value"
-                :value="r.value"
-              >
-                {{ r.label }}
-              </option>
-            </select>
-          </div>
+                <div>
+                  <label class="mb-2 block text-[12px] text-fg-dim">窗口模式</label>
+                  <div class="space-y-2">
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="moWindowMode" type="radio" value="fullscreen" class="accent-accent" />
+                      <span class="text-fg">全屏</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="moWindowMode" type="radio" value="windowed" class="accent-accent" />
+                      <span class="text-fg">窗口化</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="moWindowMode" type="radio" value="borderless" class="accent-accent" />
+                      <span class="text-fg">无边框窗口化</span>
+                    </label>
+                  </div>
+                </div>
 
-          <!-- 游戏选项（来自 GameOptions.ini） -->
-          <template v-if="iniGameOptions">
-            <!-- 遭遇战选项 -->
-            <div v-if="iniGameOptions.multiplayerLobby.checkBoxes.length > 0">
-              <label class="mb-2 block text-[12px] text-fg-dim">游戏选项</label>
-              <div class="grid grid-cols-2 gap-2">
-                <label
-                  v-for="cb in iniGameOptions.multiplayerLobby.checkBoxes.filter(c => c.visible !== false)"
-                  :key="cb.controlName"
-                  class="flex items-center gap-2 text-[12px] text-fg"
-                  :title="cb.toolTip"
-                >
-                  <input type="checkbox" class="accent-accent" />
-                  <span>{{ cb.text }}</span>
-                </label>
-              </div>
-            </div>
-
-            <!-- 遭遇战下拉选项 -->
-            <div v-if="iniGameOptions.multiplayerLobby.dropDowns.length > 0">
-              <label class="mb-2 block text-[12px] text-fg-dim">游戏参数</label>
-              <div class="grid grid-cols-2 gap-3">
-                <div v-for="dd in iniGameOptions.multiplayerLobby.dropDowns" :key="dd.controlName">
-                  <label class="mb-0.5 block text-[11px] text-fg-dim">{{ dd.toolTip || dd.optionName }}</label>
-                  <select class="w-full border border-line bg-panel px-2 py-1 text-[12px] text-fg">
-                    <option v-for="(item, i) in dd.items" :key="i" :value="i">
-                      {{ dd.itemLabels?.[i]?.trim() ?? item.trim() }}
-                    </option>
+                <div>
+                  <label class="mb-1 block text-[12px] text-fg-dim">画质</label>
+                  <select v-model.number="moDetailLevel" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg">
+                    <option v-for="d in MO_DETAIL_LEVELS" :key="d.value" :value="d.value">{{ d.label }}</option>
                   </select>
                 </div>
               </div>
-            </div>
-          </template>
-        </div>
-            </template>
-          </template>
 
-          <!-- 音量设置（全局，写 settings/RA2MO.ini [Sound]，硬链接进 playground） -->
-          <div class="mt-8 max-w-[520px]">
-            <div class="mb-3 flex items-center justify-between">
-              <h3 class="text-[15px] font-medium text-fg">音量设置</h3>
-              <button
-                class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi disabled:opacity-50"
-                :disabled="soundLoading"
-                @click="saveSoundSettings"
-              >
-                保存
-              </button>
-            </div>
-            <div v-for="s in soundSliders" :key="s.key" class="mb-3">
-              <div class="mb-1 flex items-center justify-between">
-                <label class="text-[12px] text-fg-dim">{{ s.label }}</label>
-                <span class="text-[12px] text-fg">{{ soundValues[s.key] ?? 0 }}</span>
+              <!-- 绝命时刻 -->
+              <div v-else class="space-y-4">
+                <div>
+                  <label class="mb-1 block text-[12px] text-fg-dim">分辨率</label>
+                  <select v-model="resolution" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg">
+                    <option v-for="res in resolutionList" :key="res" :value="res">{{ res }}</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label class="mb-2 block text-[12px] text-fg-dim">窗口模式</label>
+                  <div class="space-y-2">
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="windowMode" type="radio" value="fullscreen" class="accent-accent" />
+                      <span class="text-fg">全屏</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="windowMode" type="radio" value="windowed" class="accent-accent" />
+                      <span class="text-fg">窗口化</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="windowMode" type="radio" value="borderless" class="accent-accent" />
+                      <span class="text-fg">无边框窗口化</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="mb-1 block text-[12px] text-fg-dim">渲染器</label>
+                  <select v-model="renderer" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg">
+                    <option v-if="iniRendererList.length === 0" value="default">默认</option>
+                    <option v-for="r in iniRendererList" :key="r.value" :value="r.value">{{ r.label }}</option>
+                  </select>
+                </div>
+
+                <!-- 游戏选项（来自 GameOptions.ini） -->
+                <template v-if="iniGameOptions">
+                  <div v-if="iniGameOptions.multiplayerLobby.checkBoxes.length > 0">
+                    <label class="mb-2 block text-[12px] text-fg-dim">游戏选项</label>
+                    <div class="grid grid-cols-2 gap-2">
+                      <label
+                        v-for="cb in iniGameOptions.multiplayerLobby.checkBoxes.filter(c => c.visible !== false)"
+                        :key="cb.controlName"
+                        class="flex items-center gap-2 text-[12px] text-fg"
+                        :title="cb.toolTip"
+                      >
+                        <input type="checkbox" class="accent-accent" />
+                        <span>{{ cb.text }}</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div v-if="iniGameOptions.multiplayerLobby.dropDowns.length > 0">
+                    <label class="mb-2 block text-[12px] text-fg-dim">游戏参数</label>
+                    <div class="grid grid-cols-2 gap-3">
+                      <div v-for="dd in iniGameOptions.multiplayerLobby.dropDowns" :key="dd.controlName">
+                        <label class="mb-0.5 block text-[11px] text-fg-dim">{{ dd.toolTip || dd.optionName }}</label>
+                        <select class="w-full border border-line bg-bg px-2 py-1 text-[12px] text-fg">
+                          <option v-for="(item, i) in dd.items" :key="i" :value="i">
+                            {{ dd.itemLabels?.[i]?.trim() ?? item.trim() }}
+                          </option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
-              <input
-                type="range"
-                min="0"
-                max="100"
-                v-model.number="soundValues[s.key]"
-                class="w-full accent-accent"
-              />
-            </div>
-            <p v-if="soundLoading" class="text-[12px] text-fg-dim">加载中...</p>
-          </div>
+            </template>
+          </section>
 
-          <p v-if="status && activeTab === 'settings'" class="mt-3 text-[13px] text-fg-dim">{{ status }}</p>
+          <!-- 音量设置（右） -->
+          <section class="flex-1 rounded border border-line bg-panel p-4">
+            <h3 class="mb-4 text-[13px] font-medium text-fg">音量设置</h3>
+            <div class="space-y-4">
+              <div v-for="s in soundSliders" :key="s.key">
+                <div class="mb-1 flex items-center justify-between">
+                  <label class="text-[12px] text-fg-dim">{{ s.label }}</label>
+                  <span class="text-[12px] text-fg">{{ soundValues[s.key] ?? 0 }}</span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  v-model.number="soundValues[s.key]"
+                  class="w-full accent-accent"
+                />
+              </div>
+              <p v-if="soundLoading" class="text-[12px] text-fg-dim">加载中...</p>
+            </div>
+          </section>
+          </div>
         </div>
+
+        <p v-if="status && activeTab === 'settings'" class="mt-3 text-[13px] text-fg-dim">{{ status }}</p>
       </div>
     </div>
 

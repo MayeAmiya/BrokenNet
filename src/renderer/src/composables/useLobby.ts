@@ -14,7 +14,7 @@ import {
   chatColorHex, autoReady, realDropdowns, realCheckboxes, allRealCheckboxes,
   dropdownValues, checkboxValues, forcedSpawnIniOptions, launcherPlayers, channelError,
   realRandomSelectors, realRandomSelectorCount, realFactionCount, realSides, realMpColors,
-  roomSubsRegistered, cleanupFns, defaultFrameSendRate, currentPlaygroundPath,
+  roomSubsRegistered, cleanupFns, defaultFrameSendRate, currentPlaygroundPath, playgroundRevision,
   type ChatMode, type PrivateChatTarget, type ConnLogEntry, type ConnAttemptEntry
 } from './lobby-state'
 export type { ChatMode, PrivateChatTarget } from './lobby-state'
@@ -2052,6 +2052,7 @@ export function useLobby() {
       const res = await window.api.playground.apply(gameId, modSetId)
       if (res.ok && res.playgroundPath) {
         currentPlaygroundPath.value = res.playgroundPath
+        playgroundRevision.value++ // 路径固定，重建成功用版本号通知重载
         return res.playgroundPath
       }
       return null

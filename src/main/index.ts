@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain } from 'electron'
 import appIcon from '../../icon.jpg?asset'
-import { join } from 'node:path'
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { join, dirname } from 'node:path'
+import { appendFileSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 
 // 主进程启动即写日志
 try { appendFileSync('crash.log', `[${new Date().toISOString()}] main process started\n`) } catch {}
@@ -30,7 +30,7 @@ import { applyMapCode, getMapCodeFiles } from './map-code-helper'
 import { findMapFileByName } from './map-preview'
 import { loadMapPreviewData, loadMapPreviewByName, findMapByHash, findMapInfoByHash, findMapHashByName } from './map-preview'
 import { parseFileSettingConfig, executeFileSetting, checkFilesAvailability } from './file-setting'
-import { loadKeyboardBindings, loadKeyMappings, getKeyboardBindingsWithMappings, writeKeyMappings } from './keyboard-reader'
+import { loadKeyMappings, getKeyboardBindingsWithMappings, writeKeyMappings, ensureFullKeyboardMap } from './keyboard-reader'
 import { checkFileIntegrity, getMissingRequiredFiles } from './file-integrity'
 import { loadCampaignData } from './campaign-reader'
 import { loadTranslationFile, loadTranslations, findBestTranslation, translate } from './translation-reader'
@@ -208,6 +208,13 @@ function registerGameHandlers(): void {
     return launchGame({
       ...opts,
       onExit: (code) => {
+        // 游戏退出时会回写自己的 KeyboardMD（稀疏），这里重新播种全量键位表，
+        // 保证 settings/ 与 playground 硬链接的 KeyboardMD.ini 始终完整
+        try {
+          ensureFullKeyboardMap(opts.gameDir, join(dirname(opts.gameDir), 'settings'))
+        } catch (e) {
+          console.error('[keyboard] 游戏退出后重播 KeyboardMD 失败:', e)
+        }
         mainWindow?.webContents.send('game:exited', code)
       }
     })
@@ -569,9 +576,12 @@ function registerIniHandlers(): void {
     return checkFilesAvailability(resourcesPath, files)
   })
 
-  // Keyboard bindings
-  ipcMain.handle('keyboard:load', (_event, gamePath: string) => {
-    return getKeyboardBindingsWithMappings(gamePath)
+  // Keyboard bindings（游戏直接读 KeyboardMD.ini 作为键位表，文件要保持全量）
+  ipcMain.handle('keyboard:load', async (_event, gamePath: string, gameId?: string) => {
+    const settingsDir = gameId ? await getSettingsDir(gameId) : undefined
+    // KeyboardMD 稀疏/缺失时按完整命令定义播种，保证游戏始终有完整键位表
+    ensureFullKeyboardMap(gamePath, settingsDir)
+    return getKeyboardBindingsWithMappings(gamePath, settingsDir)
   })
 
   ipcMain.handle('keyboard:mappings', (_event, gamePath: string) => {
@@ -581,6 +591,13 @@ function registerIniHandlers(): void {
   ipcMain.handle('keyboard:save', async (_event, gamePath: string, bindings: Array<{ command: string; currentKey: string; defaultKey: string }>, gameId?: string) => {
     const settingsDir = gameId ? await getSettingsDir(gameId) : undefined
     writeKeyMappings(gamePath, bindings, settingsDir)
+    // 同时写回 MentalOmega 包自带的 KeyboardMD.ini（包本身带上最新键位）
+    if (settingsDir) {
+      const pkgDir = join(dirname(settingsDir), 'packages', 'MentalOmega')
+      if (existsSync(join(pkgDir, 'KeyboardMD.ini'))) {
+        writeKeyMappings(gamePath, bindings, pkgDir)
+      }
+    }
     return { ok: true }
   })
 
