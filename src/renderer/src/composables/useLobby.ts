@@ -927,6 +927,47 @@ export function useLobby() {
   }
 
   /**
+   * 房主启动前解析所有玩家的随机选项为具体值（阵营 Random/选择器 → 具体阵营，颜色 Random → 空闲颜色）。
+   * 广播最终 PO 后全员用同一套解析结果，避免各客户端用无种子 RNG 各自随机导致阵营/颜色不一致。
+   * （参考客户端是"同种子各自随机"；我们当房主直接用"房主随机+分发"更稳。）
+   */
+  function resolveRandomOptions(): void {
+    const room = currentRoom.value
+    if (!room) return
+    const rc = realRandomSelectorCount.value
+    const fc = realFactionCount.value
+    const disallowed = getDisallowedInternalSides()
+    // 具体阵营池（排除地图禁用）
+    const concretePool = Array.from({ length: fc }, (_, i) => i).filter((f) => !disallowed.has(f))
+    const pickFrom = (pool: number[]): number => pool.length ? pool[Math.floor(Math.random() * pool.length)] : 0
+    // 空闲颜色池：去掉已占用的具体颜色（含 AI）
+    const usedColors = new Set(room.players.filter((p) => p.colorIndex > 0).map((p) => p.colorIndex))
+    const freeColors = realMpColors.value.map((_, i) => i).filter((i) => i > 0 && !usedColors.has(i))
+
+    for (const p of room.players) {
+      if (p.isAI) continue
+      // 阵营：Random/选择器 → 具体阵营 UI 索引（游戏侧 = ui - rc）
+      if (p.factionIndex <= 0 || p.factionIndex < rc) {
+        const covered = p.factionIndex <= 0
+          ? concretePool
+          : (realRandomSelectors.value[sideName(p.factionIndex)] ?? []).filter((f) => !disallowed.has(f))
+        const gameSide = pickFrom(covered.length ? covered : concretePool)
+        const ui = rc + gameSide
+        p.factionIndex = ui
+        p.faction = sideName(ui)
+      }
+      // 颜色：Random → 分配空闲具体颜色
+      if (p.colorIndex <= 0) {
+        const ci = freeColors.length ? pickFrom(freeColors) : 1
+        const at = freeColors.indexOf(ci)
+        if (at >= 0) freeColors.splice(at, 1)
+        p.colorIndex = ci
+        p.color = colorHex(ci)
+      }
+    }
+  }
+
+  /**
    * 合作/挑战地图：把地图 enemyHouses（"side,color,start"，side/color 已是游戏内部索引）转为 AI 配置。
    * 返回 isCoop=false 表示非合作地图。aiLevel 由模式 coopDifficultyLevel 反推（0=困难 1=普通 2=简单）。
    */

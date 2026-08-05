@@ -362,6 +362,8 @@ function registerCncnetHandlers(): void {
       case 'DR':
       // 换隧道（房主广播，官方客户端据此更新 CurrentTunnel）
       case 'CHTNL':
+        console.log(`[sendCtcp] CHTNL ${data} -> ${channel}`)
+        cncnet.sendCtcpRaw(channel, tag, data); break
       // launcher 专属自定义命令
       case 'L-HI':
       case 'L-OK':
