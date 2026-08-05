@@ -128,6 +128,8 @@ export interface IniClientConfig {
   minimumIngameWidth: number
   minimumIngameHeight: number
   maxNameLength: number
+  /** 默认帧发送率（对齐 xna ClientConfiguration.DefaultFrameSendRate，默认 7） */
+  defaultFrameSendRate: number
   forbiddenFiles: string[]
   requiredFiles: string[]
   allowedCustomGameModes: string[]

@@ -3,6 +3,7 @@ import type { Room, RoomDetail, RoomPlayer, ChatMessage, CreateRoomParams } from
 import { TEAMS } from '@renderer/types/lobby'
 import { useNickname } from './useNickname'
 import { computeLaunchGameOptions } from './gameOptions'
+import { CSharpRandom } from '@renderer/utils/csharp-random'
 import { chatColorToIrcId } from '@renderer/types/lobby'
 import { setGameStarted } from './useGameSession'
 import {
@@ -13,7 +14,7 @@ import {
   chatColorHex, autoReady, realDropdowns, realCheckboxes, allRealCheckboxes,
   dropdownValues, checkboxValues, forcedSpawnIniOptions, launcherPlayers, channelError,
   realRandomSelectors, realRandomSelectorCount, realFactionCount, realSides, realMpColors,
-  roomSubsRegistered, cleanupFns,
+  roomSubsRegistered, cleanupFns, defaultFrameSendRate,
   type ChatMode, type PrivateChatTarget, type ConnLogEntry, type ConnAttemptEntry
 } from './lobby-state'
 export type { ChatMode, PrivateChatTarget } from './lobby-state'
@@ -249,13 +250,15 @@ function buildGameOptionsData(): string {
   // GO 的模式字段必须是内部 Name（如 "Standard"），真实客户端按 GameMode.Name 匹配；
   // 创建房间时 room.gameMode 存的是 UI 名（如 "常规作战"），这里转成内部名。
   const internalMode = realModeNameMap.value[room.gameMode] ?? room.gameMode
+  const sentSeed = room.randomSeed ?? GO_RANDOM_SEED
+  console.log(`[GO send] channel=${room.channelName} cbInts=${cbInts.length} ddIdx=${ddIdx.length} seed=${sentSeed}（room.randomSeed=${room.randomSeed}）`)
   return [
     ...cbInts,
     ...ddIdx,
     '0', // mapOfficial
     room.mapHash ?? '', // mapSHA1
     internalMode, // gameMode（内部名）
-    room.frameSendRate ?? 3, // FrameSendRate
+    room.frameSendRate ?? defaultFrameSendRate.value, // FrameSendRate：不手动改就用配置默认（对齐 xna DefaultFrameSendRate=7）
     GO_MAX_AHEAD,
     GO_PROTOCOL_VERSION,
     room.randomSeed ?? GO_RANDOM_SEED, // RandomSeed：房主生成后广播，spawn.ini Seed 与之一致
@@ -369,6 +372,9 @@ function registerRoomSubscriptions(): void {
       const existingPlayers = currentRoom.value.players
       currentRoom.value = {
         ...converted,
+        // 主进程广播不含 randomSeed/frameSendRate，保留当前值（否则 GO 里随机种子归 0、帧速率被误报成变化）
+        randomSeed: currentRoom.value.randomSeed,
+        frameSendRate: currentRoom.value.frameSendRate,
         players: existingPlayers.length > 0 ? existingPlayers : [
           makePlayer('current', getNickname(), true)
         ]
@@ -521,6 +527,13 @@ function registerRoomSubscriptions(): void {
   window.api.cncnet.onGameOptions?.((data) => {
     const room = currentRoom.value
     if (!room || room.channelName !== data.channel) return
+    // 只处理房主发的 GO：忽略自己发的（部分 IRC 服务器把 NOTICE echo 回发送者，
+    // 否则我们自己广播的 GO 会被当成"房主更新设置"误报）和无关玩家的 GO（对齐参考 sender != hostName）。
+    // 昵称大小写不敏感（IRC 规则）；room.host 缺失时回退为只忽略自己，避免收不到房主 GO 导致没 seed。
+    const myNick = getNickname()
+    const lower = (s?: string) => s?.toLowerCase()
+    if (data.nick && myNick && lower(data.nick) === lower(myNick)) return
+    if (data.nick && room.host && lower(data.nick) !== lower(room.host)) return
     void applyGameOptionsAsync(data)
   })
   async function applyGameOptionsAsync(data: { channel: string; data: string }): Promise<void> {
@@ -555,6 +568,7 @@ function registerRoomSubscriptions(): void {
     // RandomSeed（fixed[6]）：房主广播的种子，客户端启动时 spawn.ini Seed 用它，与房主一致
     const randomSeed = parseInt(fixed[6] ?? '', 10)
     if (!isNaN(randomSeed)) room.randomSeed = randomSeed
+    console.log(`[GO recv] channel=${data.channel} roomChannel=${room.channelName} cbCount=${cbCount}/${ddCount} fixedStart=${fixedStart} seed字段=${fixed[6]} -> parsed=${randomSeed} room.randomSeed=${room.randomSeed}`)
     const changed: string[] = []
     // 地图同步：先用广播图名即时设置（不阻塞 GO 应用——findByHash 首次要建全图索引，可能 1-2s），
     // 再异步按内容哈希解析本地图替换（跨语言 host 图名可能对不上，SHA1 是权威）。
@@ -720,6 +734,15 @@ export function useLobby() {
     if (gamePath) currentGamePath.value = gamePath
     if (modSetId) currentModSetId.value = modSetId
     if (gameId) currentGameId.value = gameId
+
+    // 加载客户端配置里的默认帧发送率（对齐 xna DefaultFrameSendRate，默认 7）：
+    // 房主不手动改 /framesendrate 时，GO 里就发这个默认值，官方客户端才不会看到被改成 3
+    if (gamePath && window.api?.clientConfig?.load) {
+      try {
+        const cfg = await window.api.clientConfig.load(gamePath)
+        if (typeof cfg?.defaultFrameSendRate === 'number') defaultFrameSendRate.value = cfg.defaultFrameSendRate
+      } catch { /* 读不到配置用默认 7 */ }
+    }
 
     // 清掉上一次连接注册的监听器，避免重连/切游戏后监听器叠加。
     // 叠加会导致事件被重复处理（重复系统消息、重复 joinChannel），
@@ -927,43 +950,128 @@ export function useLobby() {
   }
 
   /**
-   * 房主启动前解析所有玩家的随机选项为具体值（阵营 Random/选择器 → 具体阵营，颜色 Random → 空闲颜色）。
-   * 广播最终 PO 后全员用同一套解析结果，避免各客户端用无种子 RNG 各自随机导致阵营/颜色不一致。
-   * （参考客户端是"同种子各自随机"；我们当房主直接用"房主随机+分发"更稳。）
+   * 用 C# System.Random(seed) 复刻参考客户端的 Randomize 循环，把房间内所有玩家的随机项解析为具体值。
+   *
+   * 参考（GameLobbyBase.Randomize + PlayerHouseInfo.RandomizeSide/Color/Start）：
+   * - 一个 RNG（new Random(RandomSeed)）贯穿所有玩家：人类按房间顺序在前，AI 在后；
+   * - 每人依次 RandomizeSide（Random/选择器/观察者走 do..while 重摇禁用阵营，重摇次数取决于禁用集）
+   *   → RandomizeColor（Random 从空闲色池抽一个，抽中即移出）→ RandomizeStart（Random 起点写 -1，游戏自己随机，不消费 RNG）。
+   * - RNG 消费顺序必须逐位复刻：多抽/少抽一次，后面所有玩家的结果都会错位。
+   *
+   * 我们当房主时用它解析后广播具体 PO（加入方收到具体值走 concrete 分支不再随机，故 ban 随机、分发等
+   * launcher 特色可保留）；加入外部房间时用它复刻房主客户端"同种子各自随机"的结果，保证 spawn.ini 全员一致。
+   *
+   * 已知缺口（地图数据暂无，与参考不同但影响面小）：
+   * - 参考在"客户端强制随机起点 / 非顺序 waypoint 图 / 合作 teamStartMappings"时会消费 RNG 分配具体起点
+   *   （需 AllowedStartingLocations），这里统一按 -1（游戏自己随机）处理，不消费 RNG。
    */
-  function resolveRandomOptions(): void {
-    const room = currentRoom.value
-    if (!room) return
+  function randomizeRoomFromSeed(room: RoomDetail, seed: number, isHost: boolean): void {
+    const rng = new CSharpRandom(seed)
     const rc = realRandomSelectorCount.value
     const fc = realFactionCount.value
-    const disallowed = getDisallowedInternalSides()
-    // 具体阵营池（排除地图禁用）
-    const concretePool = Array.from({ length: fc }, (_, i) => i).filter((f) => !disallowed.has(f))
-    const pickFrom = (pool: number[]): number => pool.length ? pool[Math.floor(Math.random() * pool.length)] : 0
-    // 空闲颜色池：去掉已占用的具体颜色（含 AI）
-    const usedColors = new Set(room.players.filter((p) => p.colorIndex > 0).map((p) => p.colorIndex))
-    const freeColors = realMpColors.value.map((_, i) => i).filter((i) => i > 0 && !usedColors.has(i))
+    const mapDisallowed = getDisallowedInternalSides()
+    // 当前模式：并入模式的禁用阵营（对齐 GetDisallowedSidesForGroup，人类/AI 分开）
+    const internalMode = realModeNameMap.value[room.gameMode] ?? room.gameMode
+    const mode = realModesData.value.find(
+      (m: any) => (m.name || m.uiName) === internalMode || (m.name || m.uiName) === room.gameMode
+    )
+    const disallowedFor = (forHuman: boolean): Set<number> => {
+      const s = new Set(mapDisallowed)
+      if (mode) {
+        for (const i of mode.disallowedPlayerSides ?? []) s.add(i)
+        const specific = forHuman ? mode.disallowedHumanPlayerSides : mode.disallowedComputerPlayerSides
+        for (const i of specific ?? []) s.add(i)
+      }
+      // 复选框禁用阵营（对齐 GetDisallowedSides 的 checkBox.ApplyDisallowedSideIndex）：
+      // 勾选（反选框为未勾选）时，把该复选框 DisallowedSideIndex 列的阵营并入禁用集
+      for (const cb of allRealCheckboxes.value) {
+        const active = (checkboxValues.value[cb.name] ?? cb.checked) !== cb.reversed
+        if (active) {
+          for (const i of cb.disallowedSideIndices ?? []) s.add(i)
+        }
+      }
+      return s
+    }
+    const disallowedHuman = disallowedFor(true)
+    const disallowedAI = disallowedFor(false)
 
+    // 空闲色池（参考 freeColors：0..N-1 = 具体色索引，不含 Random；去掉地图禁用 + 已被占用）
+    const colorCount = Math.max(0, realMpColors.value.length - 1)
+    const coopDisallowedColors = getDisallowedInternalColors() // mapData.disallowedPlayerColors（MPColor 索引空间）
+    const freeColors: number[] = []
+    for (let i = 0; i < colorCount; i++) {
+      if (coopDisallowedColors.has(i)) continue
+      freeColors.push(i)
+    }
+    const removeColor = (refIdx: number): void => {
+      const at = freeColors.indexOf(refIdx)
+      if (at >= 0) freeColors.splice(at, 1)
+    }
+    // 参考在进入循环前把所有玩家的占用色从空闲池移除（含 AI）
     for (const p of room.players) {
-      if (p.isAI) continue
-      // 阵营：Random/选择器 → 具体阵营 UI 索引（游戏侧 = ui - rc）
-      if (p.factionIndex <= 0 || p.factionIndex < rc) {
-        const covered = p.factionIndex <= 0
-          ? concretePool
-          : (realRandomSelectors.value[sideName(p.factionIndex)] ?? []).filter((f) => !disallowed.has(f))
-        const gameSide = pickFrom(covered.length ? covered : concretePool)
-        const ui = rc + gameSide
-        p.factionIndex = ui
-        p.faction = sideName(ui)
+      if (p.colorIndex > 0) removeColor(p.colorIndex - 1)
+    }
+
+    // 参考顺序：人类（房间顺序）在前，AI 在后
+    const ordered = [
+      ...room.players.filter((p) => !p.isAI),
+      ...room.players.filter((p) => p.isAI)
+    ]
+
+    // do..while 重摇（参考 RandomizeSide）：抽到禁用/ban 就重摇，RNG 消费次数必须和参考一致。
+    // 上限兜底：参考不会全禁（UI 保证）；launcher ban 可能全禁 → 回退到去掉禁用后的池再抽。
+    const rollSide = (pool: number[], disallowed: Set<number>, banned: Set<number>): number => {
+      const attempts = Math.max(pool.length, 1)
+      for (let i = 0; i < attempts; i++) {
+        const sideId = pool[rng.next(pool.length)]
+        if (!disallowed.has(sideId) && !banned.has(sideId)) return sideId
       }
-      // 颜色：Random → 分配空闲具体颜色
+      const allowed = pool.filter((s) => !disallowed.has(s))
+      return allowed.length ? allowed[rng.next(allowed.length)] : -1
+    }
+
+    for (const p of ordered) {
+      const disallowed = p.isAI ? disallowedAI : disallowedHuman
+      const banned = isHost ? new Set(p.bannedFactions ?? []) : new Set<number>()
+
+      // ── RandomizeSide（对齐 PlayerHouseInfo.RandomizeSide）──
+      const spectator = p.factionIndex === rc + fc
+      if (p.factionIndex <= 0 || spectator) {
+        // Random 或观察者：都对全体阵营 do..while 重摇（观察者也消费 RNG，保证序列和参考一致）
+        const sideId = rollSide(Array.from({ length: fc }, (_, i) => i), disallowed, banned)
+        if (sideId >= 0 && !spectator) {
+          const ui = rc + sideId
+          p.factionIndex = ui
+          p.faction = sideName(ui)
+        }
+      } else if (p.factionIndex < rc) {
+        // 子阵营随机选择器：从覆盖阵营里 do..while 重摇
+        const covered = coveredFactionsForSide(sideName(p.factionIndex))
+        const sideId = rollSide(covered.length ? covered : Array.from({ length: fc }, (_, i) => i), disallowed, banned)
+        if (sideId >= 0) {
+          const ui = rc + sideId
+          p.factionIndex = ui
+          p.faction = sideName(ui)
+        }
+      }
+      // 具体阵营 / 观察者：不变
+
+      // ── RandomizeColor（对齐 PlayerHouseInfo.RandomizeColor）──
       if (p.colorIndex <= 0) {
-        const ci = freeColors.length ? pickFrom(freeColors) : 1
-        const at = freeColors.indexOf(ci)
-        if (at >= 0) freeColors.splice(at, 1)
-        p.colorIndex = ci
-        p.color = colorHex(ci)
+        if (freeColors.length > 0) {
+          const k = rng.next(freeColors.length)
+          const refIdx = freeColors[k]
+          freeColors.splice(k, 1)
+          p.colorIndex = refIdx + 1
+          p.color = realMpColors.value[refIdx + 1]?.hex ?? ''
+        }
+        // 无空闲色：保持 Random（参考 freeColors 空时同样保留）
+      } else {
+        removeColor(p.colorIndex - 1)
       }
+
+      // ── RandomizeStart（对齐 PlayerHouseInfo.RandomizeStart 默认分支）──
+      // 参考默认 Random 起点 → -1（游戏自己随机，不消费 RNG）；具体起点保持不动。缺口见函数头注释。
     }
   }
 
@@ -1015,6 +1123,14 @@ export function useLobby() {
       lobbyMessages.value.push(genLobbyMsg('system', '系统', '缺少游戏目录信息，无法启动', 'system'))
       return
     }
+    // 加入方必须拿到房主的 RandomSeed（GO 广播）才能启动：seed 是 spawn.ini 里全员同步的关键，
+    // 拿不到就生成一个和房主不同的 seed → 开局 desync。这里明确报错而不是静默错 seed。
+    if (!isHost && typeof room.randomSeed !== 'number') {
+      const msg = '未收到房主的游戏设置（GO，含随机种子），无法启动——请房主重发设置或重进房间'
+      pushRoomNotice(msg)
+      lobbyMessages.value.push(genLobbyMsg('system', '系统', msg, 'system'))
+      return
+    }
     const applyResult = await window.api.playground.apply(gameId, modSetId)
     console.log('[launchMultiplayer] playground 构建结果:', applyResult)
     if (!applyResult.ok || !applyResult.playgroundPath) {
@@ -1023,6 +1139,13 @@ export function useLobby() {
     }
     const gameDir = applyResult.playgroundPath
     const playerName = useNickname().getNickname()
+
+    // 加入外部房间：用 GO 广播的 RandomSeed 复刻参考客户端的"同种子各自随机"，把全员 Random 阵营/颜色
+    // 解析成与官方客户端一致的具体值（JS Math.random() 无种子，和 C# System.Random(seed) 结果对不上会 desync）。
+    // 房主路径已在 hostLaunch 用同一函数解析并广播具体 PO，这里只处理加入方。
+    if (!isHost && typeof room.randomSeed === 'number') {
+      randomizeRoomFromSeed(room, room.randomSeed, false)
+    }
 
     // AI 玩家不占隧道端口，也不进 Other 段（对齐 xna：AI 按房屋 ID 写 HouseHandicaps/HouseCountries/HouseColors）
     const humans = room.players.filter((p) => !p.isAI)
@@ -1089,7 +1212,7 @@ export function useLobby() {
         myStart: myPlayer?.startIndex,
         uiGameMode: room.gameMode,
         uiMapName: room.map,
-        frameSendRate: room.frameSendRate ?? 3,
+        frameSendRate: room.frameSendRate ?? defaultFrameSendRate.value,
         protocol: 2,
         playerCount: humans.length, // PlayerCount = 人类数（对齐 xna Players.Count；AI 只在 AIPlayers）
         aiPlayers: coop.isCoop ? coop.aiCount : aiList.length,
@@ -1105,6 +1228,7 @@ export function useLobby() {
         extraSettings: spawnIniSettings
       }
     })
+    console.log(`[launch] isHost=${isHost} room.randomSeed=${room.randomSeed} -> spawn.ini Seed=${room.randomSeed ?? Math.floor(Math.random() * 99999999)}`)
     console.log('[launchMultiplayer] 启动结果:', launchResult, { customIniPaths })
     if (!launchResult?.ok) {
       lobbyMessages.value.push(genLobbyMsg('system', '系统', `游戏启动失败: ${launchResult?.error ?? '未知错误'}`, 'system'))
@@ -1215,28 +1339,6 @@ export function useLobby() {
       return
     }
 
-    // launcher ban 随机：对每个随机/选择器阵营，从"覆盖 − 禁用(玩家ban + 地图禁用)"里随机选具体阵营，PO 广播给全员
-    if (isAllLauncher()) {
-      const mapDisallowed = getDisallowedInternalSides()
-      const globalAllowed = Array.from({ length: realFactionCount.value }, (_, i) => i)
-        .filter((f) => !mapDisallowed.has(f))
-      for (const p of room.players) {
-        const covered = coveredFactionsForSide(p.faction)
-        if (covered.length === 0) continue // 具体阵营，无需解析
-        const banned = new Set(p.bannedFactions ?? [])
-        const allowed = covered.filter((f) => !banned.has(f) && !mapDisallowed.has(f))
-        // 覆盖全禁（含玩家 ban + 地图禁用）→ 回退全局可用；全部禁用才保持原随机侧
-        const pool = allowed.length ? allowed : globalAllowed
-        if (pool.length === 0) continue
-        const chosen = pool[Math.floor(Math.random() * pool.length)]
-        const factionName = realSides.value[realRandomSelectorCount.value + chosen]?.name
-        if (!factionName) continue
-        p.faction = factionName
-        p.factionIndex = sideIndex(factionName)
-      }
-      broadcastPlayerOptions()
-    }
-
     // 只给人类玩家分配隧道端口（AI 不联机）
     const humanPlayers = room.players.filter((p) => !p.isAI)
     const aiList = room.players.filter((p) => p.isAI)
@@ -1252,8 +1354,9 @@ export function useLobby() {
       pushRoomNotice('请先在"选择服务器"里选定一个隧道服务器')
       return
     }
-    // 房主随机选项：把所有玩家 Random/选择器阵营、Random 颜色解析为具体值，广播最终 PO
-    resolveRandomOptions()
+    // 房主随机选项：用房间种子复刻参考 Randomize（含 launcher ban 随机）把所有玩家
+    // Random/选择器阵营、Random 颜色解析为具体值，广播最终 PO（加入方收到具体值不再自己随机）
+    randomizeRoomFromSeed(room, room.randomSeed ?? Math.floor(Math.random() * 99999999), true)
     broadcastPlayerOptions()
     // 选隧道时发的 CHTNL 可能早于客户端加入（空房间没人收），启动前再广播一次确保全员 CurrentTunnel 正确
     window.api.cncnet.sendCtcp(room.channelName ?? '', 'CHTNL', selectedTunnel.value)

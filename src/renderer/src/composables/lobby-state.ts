@@ -93,6 +93,8 @@ export const forcedSpawnIniOptions = ref<Record<string, string>>({})
 
 /** 已确认为 launcher 的玩家昵称集合 */
 export const launcherPlayers = new Set<string>()
+/** 默认帧发送率（对齐 xna ClientConfiguration.DefaultFrameSendRate=7；连接时从 ClientDefinitions.ini 加载） */
+export const defaultFrameSendRate = ref(7)
 /** 频道加入失败（如被拉黑 +b）——连接状态要显示警告而不是绿色 */
 export const channelError = ref('')
 /** 子阵营随机选择器 → 覆盖的具体阵营索引（如 任一苏联=[3,4,5]） */

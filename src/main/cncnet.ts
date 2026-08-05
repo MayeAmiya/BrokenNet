@@ -1196,7 +1196,7 @@ export class CnCNetManager {
         this.sendToRenderer('cncnet:player-options-broadcast', { channel, data })
         break
       case 'GO': // 游戏选项（host -> client）
-        this.sendToRenderer('cncnet:game-options', { channel, data })
+        this.sendToRenderer('cncnet:game-options', { channel, nick, data })
         break
       case 'START': // 启动游戏
         console.log(`[CnCNet] 收到 START: ${data}`)

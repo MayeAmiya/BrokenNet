@@ -17,6 +17,8 @@ export interface GameOptionCheckBox {
   reversed: boolean
   enabledSpawnIniValue: string
   disabledSpawnIniValue: string
+  /** 勾选（反选框为未勾选）时连带禁用的阵营索引（对齐 xna GameLobbyCheckBox.DisallowedSideIndices） */
+  disallowedSideIndices?: number[]
 }
 
 export interface GameOptionDropDown {

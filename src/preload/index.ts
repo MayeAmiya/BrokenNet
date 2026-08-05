@@ -360,8 +360,8 @@ const api = {
       ipcRenderer.on('cncnet:player-ready', handler)
       return () => { ipcRenderer.removeListener('cncnet:player-ready', handler) }
     },
-    onGameOptions: (callback: (data: { channel: string; data: string }) => void) => {
-      const handler = (_e: Electron.IpcRendererEvent, data: { channel: string; data: string }) => callback(data)
+    onGameOptions: (callback: (data: { channel: string; nick?: string; data: string }) => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, data: { channel: string; nick?: string; data: string }) => callback(data)
       ipcRenderer.on('cncnet:game-options', handler)
       return () => { ipcRenderer.removeListener('cncnet:game-options', handler) }
     },
@@ -581,6 +581,7 @@ const api = {
       minimumIngameWidth: number
       minimumIngameHeight: number
       maxNameLength: number
+      defaultFrameSendRate: number
       forbiddenFiles: string[]
       requiredFiles: string[]
       allowedCustomGameModes: string[]

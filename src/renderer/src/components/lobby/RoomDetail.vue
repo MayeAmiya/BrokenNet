@@ -4,6 +4,7 @@ import type { Room, RoomPlayer, ChatMessage } from '@renderer/types/lobby'
 import { MP_COLORS, SIDES, TEAMS } from '@renderer/types/lobby'
 import MapPreview from '@renderer/components/MapPreview.vue'
 import { useMapPreview } from '@renderer/composables/useMapPreview'
+import { defaultFrameSendRate } from '@renderer/composables/lobby-state'
 
 const props = defineProps<{
   room: Room
@@ -63,9 +64,9 @@ const chatScrollRef = ref<HTMLDivElement>()
 // 掷骰子控件：[骰子数] d [面数]
 const diceCount = ref(1)
 const diceSides = ref(6)
-// 帧发送率下拉（0-10），默认 3（RA2 常见默认值）
+// 帧发送率下拉（0-10），默认对齐 xna DefaultFrameSendRate（7）
 const FRAME_SEND_RATE_OPTIONS = Array.from({ length: 11 }, (_, i) => i)
-const frameSendRate = ref(props.room.frameSendRate ?? 3)
+const frameSendRate = ref(props.room.frameSendRate ?? defaultFrameSendRate.value)
 watch(() => props.room.frameSendRate, (v) => {
   if (v !== undefined) frameSendRate.value = v
 })

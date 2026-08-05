@@ -40,6 +40,8 @@ export function readClientConfig(gamePath: string): IniClientConfig {
     minimumIngameWidth: sec?.getInt('MinimumIngameWidth', 800) ?? 800,
     minimumIngameHeight: sec?.getInt('MinimumIngameHeight', 600) ?? 600,
     maxNameLength: sec?.getInt('MaxNameLength', 14) ?? 14,
+    // 对齐 xna ClientConfiguration.DefaultFrameSendRate（[Settings] DefaultFrameSendRate，默认 7）
+    defaultFrameSendRate: sec?.getInt('DefaultFrameSendRate', 7) ?? 7,
     forbiddenFiles: forbiddenRaw ? forbiddenRaw.split(',').map(s => s.trim()) : [],
     requiredFiles: requiredRaw ? requiredRaw.split(',').map(s => s.trim()) : [],
     allowedCustomGameModes: modesRaw ? modesRaw.split(',').map(s => s.trim()) : [],

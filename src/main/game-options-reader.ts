@@ -45,6 +45,8 @@ export interface MPOptionCheckBox {
   customIniPath?: string
   /** 反选：勾选时写 DisabledSpawnIniValue（对齐 xna Reversed） */
   reversed: boolean
+  /** 勾选（反选框为未勾选）时连带禁用的阵营索引（对齐 xna GameLobbyCheckBox.DisallowedSideIndices） */
+  disallowedSideIndices: number[]
   /** 勾选时写入 spawn.ini 的值（默认 "True"） */
   enabledSpawnIniValue: string
   /** 未勾选时写入 spawn.ini 的值（默认 "False"） */
@@ -105,6 +107,10 @@ function parseCheckBox(ini: CCIniFile, name: string): MPOptionCheckBox | null {
     customIniPath: sec.getString('CustomIniPath') || undefined,
     // 对齐 xna GameSessionCheckBox：Reversed 勾选时写 disabled 值；enabled/disabled 默认 True/False
     reversed: sec.getBoolean('Reversed', false),
+    // 对齐 xna GameLobbyCheckBox.ParseControlINIAttribute：DisallowedSideIndex / DisallowedSideIndices
+    // 是空格分隔的阵营索引，勾选（反选框为未勾选）时把这些阵营从随机池禁用
+    disallowedSideIndices: (sec.getString('DisallowedSideIndex') || sec.getString('DisallowedSideIndices') || '')
+      .trim().split(/\s+/).map((s) => parseInt(s, 10)).filter((n) => !isNaN(n)),
     enabledSpawnIniValue: sec.getString('EnabledSpawnIniValue') || 'True',
     disabledSpawnIniValue: sec.getString('DisabledSpawnIniValue') || 'False',
     toolTip: sec.getString('ToolTip'),
