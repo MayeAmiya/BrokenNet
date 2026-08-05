@@ -650,6 +650,13 @@ watch(selectedModSetId, (id) => {
   }
 })
 
+// 切换播放集重建 playground 完成（路径变化）→ 单人战役从新 playground 重新加载
+watch(currentPlaygroundPath, (path) => {
+  if (path && props.profile.installPath) {
+    loadCampaignData(selectedModSetId.value, props.profile.id, path)
+  }
+})
+
 onUnmounted(() => {
   document.removeEventListener('click', handleDropdownClickOutside)
   window.removeEventListener('keydown', onCaptureKeydown, true)
