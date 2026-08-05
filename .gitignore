@@ -1,0 +1,28 @@
+# 依赖 / 构建产物
+node_modules/
+out/
+dist/
+
+# 日志与崩溃转储
+*.log
+crash*.log
+crash_log.txt
+
+# TypeScript 增量构建信息
+*.tsbuildinfo
+
+# 临时文件
+.tmp-*/
+.tmp-*
+
+# 运行时数据（本地 mod 副本等）
+mods/custom/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude 会话数据
+.claude/

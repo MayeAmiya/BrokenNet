@@ -1,0 +1,26 @@
+{
+  "name": "brokennet",
+  "version": "0.1.0",
+  "description": "BrokenNet — 为重置版将军TD 打造的启动器（附带 CnCNet/DTA 兼容）",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "postinstall": "node scripts/install-electron.mjs",
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.web.json && tsc --noEmit -p tsconfig.node.json"
+  },
+  "devDependencies": {
+    "@swc/core": "^1.15.46",
+    "@tailwindcss/vite": "^4.3.3",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "electron": "^43.2.0",
+    "electron-vite": "^5.0.0",
+    "iconv-lite": "^0.7.3",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vue": "^3.5.40",
+    "vue-tsc": "^3.3.8"
+  }
+}
