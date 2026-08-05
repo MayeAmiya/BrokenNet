@@ -138,13 +138,31 @@ function aiLevelToRef(aiLevel?: number): number {
 function refToAiLevel(ref: number): number {
   return ref + 1
 }
+/** PO/OR 协议 side 字节 = 直接游戏索引（0=随机，1..fc=具体阵营 0..fc-1，fc=观察者）。
+ *  不带 Random+选择器的 UI 索引——进入游戏的索引只有 12 个阵营 + 观察者（对齐官方客户端约定）。
+ *  选择器（任一X）直接索引无法区分，按 Random(0) 处理，启动时随机。 */
+function packSide(p: RoomPlayer): number {
+  const idx = sideIndex(p.faction)
+  const rc = realRandomSelectorCount.value
+  const fc = realFactionCount.value
+  if (idx <= 0) return 0        // Random
+  if (idx < rc) return 0        // 选择器 → 按 Random
+  if (idx >= rc + fc) return fc // 观察者 → fc
+  return idx - rc               // 具体阵营 → 0..fc-1
+}
+/** 反向：wire side 字节 → 本地 UI 索引（直接索引 + rc；0=Random） */
+function unpackSideToUi(side: number): number {
+  const rc = realRandomSelectorCount.value
+  if (side <= 0) return 0
+  return side + rc
+}
 /** OR（客户端→主机）：byte0=side,byte1=color,byte2=start,byte3=team */
 function packOrRequest(p: RoomPlayer): number {
-  return (sideIndex(p.faction) & 0xFF) | ((colorIndex(p.color) & 0xFF) << 8) | (packStartByte(p.startIndex) << 16) | ((teamIndex(p.team) & 0xFF) << 24)
+  return (packSide(p) & 0xFF) | ((colorIndex(p.color) & 0xFF) << 8) | (packStartByte(p.startIndex) << 16) | ((teamIndex(p.team) & 0xFF) << 24)
 }
 /** PO（主机→全员）：byte0=team,byte1=start,byte2=color,byte3=side */
 function packPo(p: RoomPlayer): number {
-  return (teamIndex(p.team) & 0xFF) | (packStartByte(p.startIndex) << 8) | ((colorIndex(p.color) & 0xFF) << 16) | ((sideIndex(p.faction) & 0xFF) << 24)
+  return (teamIndex(p.team) & 0xFF) | (packStartByte(p.startIndex) << 8) | ((colorIndex(p.color) & 0xFF) << 16) | ((packSide(p) & 0xFF) << 24)
 }
 function unpackOr(packed: number): { side: number; color: number; start: number; team: number } {
   return { side: packed & 0xFF, color: (packed >> 8) & 0xFF, start: (packed >> 16) & 0xFF, team: (packed >> 24) & 0xFF }
@@ -456,7 +474,7 @@ function registerRoomSubscriptions(): void {
     const u = unpackOr(data.options)
     const player = room.players.find((p) => p.name === data.nick)
     if (!player) return
-    player.faction = sideName(u.side); player.factionIndex = u.side
+    player.faction = sideName(unpackSideToUi(u.side)); player.factionIndex = unpackSideToUi(u.side)
     player.color = colorHex(u.color); player.colorIndex = u.color
     player.team = teamName(u.team); player.teamIndex = u.team
     player.startIndex = unpackStartIndex(u.start)
@@ -486,7 +504,7 @@ function registerRoomSubscriptions(): void {
           isAI: true,
           aiLevel: refToAiLevel(aiLevelNum),
           color: colorHex(u.color), colorIndex: u.color,
-          faction: sideName(u.side), factionIndex: u.side,
+          faction: sideName(unpackSideToUi(u.side)), factionIndex: unpackSideToUi(u.side),
           team: teamName(u.team), teamIndex: u.team,
           startIndex: unpackStartIndex(u.start),
           sideName: sideName(u.side)
@@ -505,7 +523,7 @@ function registerRoomSubscriptions(): void {
         isAI: /^computer/i.test(name),
         aiLevel: ex?.aiLevel,
         color: colorHex(u.color), colorIndex: u.color,
-        faction: sideName(u.side), factionIndex: u.side,
+        faction: sideName(unpackSideToUi(u.side)), factionIndex: unpackSideToUi(u.side),
         team: teamName(u.team), teamIndex: u.team,
         startIndex: unpackStartIndex(u.start),
         sideName: sideName(u.side)
