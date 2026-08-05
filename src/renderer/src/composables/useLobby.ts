@@ -988,6 +988,7 @@ export function useLobby() {
     // 找"我"的玩家（host 或昵称匹配），取其队伍/起始/阵营/颜色；端口按名字查 START 分配
     const myPlayer = humans.find((p) => p.isHost || p.name === playerName) ?? humans[0]
     const myPort = portsByPlayer[myPlayer?.name ?? ''] ?? 0
+    console.log(`[launchMultiplayer] 我=${myPlayer?.name} 阵营索引=${myPlayer?.factionIndex}(名=${myPlayer?.faction}) -> 游戏Side=${resolveInternalSide(myPlayer?.factionIndex ?? 0)} | 颜色索引=${myPlayer?.colorIndex} -> 游戏Color=${resolveGameColor(myPlayer?.colorIndex ?? 0)} | 隧道=${tunIp}:${tunPort} rc=${realRandomSelectorCount.value}`)
 
     // 其他玩家（人类，排除自己），Ip 一律 0.0.0.0（全走隧道），Port 用各自分配的隧道端口
     // side 用游戏内部阵营索引（对齐 xna InternalSideIndex）
@@ -1255,7 +1256,7 @@ export function useLobby() {
       tunPort = t?.port ?? 0
     } catch { /* 无隧道列表 */ }
 
-    console.log(`[clientLaunch] START=${data.data} -> 隧道=${tunIp}:${tunPort}`)
+    console.log(`[clientLaunch] START=${data.data} START隧道=${tunIp} 房间广播隧道=${room.tunnelServer} -> 最终=${tunIp}:${tunPort}`)
     await launchMultiplayer(currentGamePath.value, currentGameId.value, currentModSetId.value, room, tunIp, tunPort, portsByPlayer, false, sessionId)
     // 进入游戏信号
     await window.api.cncnet.sendCtcp(room.channelName ?? '', 'STRTD', '')
