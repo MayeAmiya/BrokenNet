@@ -80,9 +80,12 @@ export function getKeyboardBindingsWithMappings(gamePath: string): KeyboardBindi
  */
 export function writeKeyMappings(
   gamePath: string,
-  bindings: Array<{ command: string; currentKey: string; defaultKey: string }>
+  bindings: Array<{ command: string; currentKey: string; defaultKey: string }>,
+  settingsDir?: string
 ): void {
-  const iniPath = path.join(gamePath, 'KeyboardMD.ini')
+  // 全局设置：写入 settings/（playground 硬链接，游戏读到）；未给则写安装目录
+  const iniPath = path.join(settingsDir || gamePath, 'KeyboardMD.ini')
+  if (settingsDir) fs.mkdirSync(path.dirname(iniPath), { recursive: true })
   const ini = fs.existsSync(iniPath) ? loadIniFile(iniPath) : new CCIniFile()
 
   // 重建 Hotkey 段（只保留覆盖项，丢弃旧残留）

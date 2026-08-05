@@ -31,6 +31,8 @@ export interface SpawnIniBase {
   customLoadScreen?: string
   /** 游戏速度 */
   gameSpeed?: number
+  /** 自定义地图目录（写 [Settings] MPMapsPath，游戏从这里读下载/导入的地图） */
+  mpMapsPath?: string
 }
 
 export interface CampaignSpawnOptions extends SpawnIniBase {
@@ -200,6 +202,7 @@ function writeBaseSettings(ini: IniWriter, opts: SpawnIniBase): void {
   if (opts.mapSha1) ini.set('Settings', 'MapSHA1', opts.mapSha1)
   if (opts.customLoadScreen) ini.set('Settings', 'CustomLoadScreen', opts.customLoadScreen)
   if (opts.gameSpeed !== undefined) ini.set('Settings', 'GameSpeed', opts.gameSpeed)
+  if (opts.mpMapsPath) ini.set('Settings', 'MPMapsPath', opts.mpMapsPath)
 }
 
 // ─── Campaign ──────────────────────────────────────────

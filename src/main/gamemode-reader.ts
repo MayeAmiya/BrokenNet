@@ -1,6 +1,9 @@
 import path from 'path'
 import fs from 'fs'
 import { loadIniFile, CCIniFile } from './ini-parser'
+import { getResourceDir } from './resource-dir'
+import { findMapInBundle } from './map-library-ops'
+import { readWaypoints, readMapSizeInfo } from './map-preview'
 
 export interface GameModeConfig {
   name: string
@@ -262,4 +265,89 @@ export function loadMaps(gamePath: string): MapConfig[] {
   }
 
   return maps
+}
+
+/**
+ * 包内可选配置读取（模式/预设，格式 TBD）。
+ * 扩展点：后续定了下载地图的配置格式，在这里解析出 gameModes / forcedOptions 等。
+ * 当前宽松读取 mode.ini/map.ini 的 [GameMode] Mode|Name 进 gameModes；其余忽略。
+ */
+function readBundleConfig(pkgDir: string): { gameModes: string[]; forcedOptions: Record<string, string> } {
+  const result = { gameModes: [] as string[], forcedOptions: {} as Record<string, string> }
+  for (const name of ['mode.ini', 'map.ini', 'preset.ini']) {
+    const p = path.join(pkgDir, name)
+    if (!fs.existsSync(p)) continue
+    try {
+      const ini = loadIniFile(p)
+      const gm = ini.getSection('GameMode')?.getString('Mode')
+        ?? ini.getSection('GameMode')?.getString('Name')
+        ?? ini.getSection('General')?.getString('Mode')
+      if (gm) result.gameModes = [gm]
+      const opts = ini.getSection('Options') ?? ini.getSection('Preset')
+      if (opts) {
+        for (const key of opts.keys_names()) result.forcedOptions[key] = opts.getString(key)
+      }
+    } catch { /* 忽略坏配置 */ }
+    break
+  }
+  return result
+}
+
+/**
+ * 独立地图库读取（下载地图专用）：扫 resourceDir/<gameId>/maps/ 下的文件夹包，
+ * 每个包 = <图名>/ 内含 .map + 可选配置。返回 MapConfig 供 lobby 地图列表合并。
+ * 原有地图仍走 loadMaps（MentalOmegaMaps.ini），不在此。
+ */
+export async function loadLibraryMaps(gameId: string): Promise<MapConfig[]> {
+  const resourceDir = await getResourceDir()
+  if (!resourceDir) return []
+  const mapsDir = path.join(resourceDir, gameId, 'maps')
+
+  let entries: fs.Dirent[] = []
+  try {
+    entries = await fs.promises.readdir(mapsDir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+
+  const result: MapConfig[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+    const pkgDir = path.join(mapsDir, entry.name)
+    const mapFile = await findMapInBundle(pkgDir)
+    if (!mapFile) continue
+
+    let mapIni: CCIniFile
+    try {
+      mapIni = loadIniFile(mapFile)
+    } catch {
+      continue
+    }
+    const sizeInfo = readMapSizeInfo(mapIni)
+    const waypointCount = readWaypoints(mapIni).length
+    const players = Math.max(2, Math.min(waypointCount || 2, 8))
+    const { gameModes, forcedOptions } = readBundleConfig(pkgDir)
+
+    result.push({
+      filePath: mapFile,
+      baseFilePath: mapFile,
+      description: entry.name,
+      gameModes,
+      minPlayers: players,
+      maxPlayers: players,
+      enforceMaxPlayers: false,
+      size: `${sizeInfo.width}x${sizeInfo.height}`,
+      localSize: `${sizeInfo.localSize.w}x${sizeInfo.localSize.h}`,
+      previewSize: '',
+      waypoints: {},
+      isCoopMission: false,
+      briefing: '',
+      disallowedPlayerSides: [],
+      disallowedPlayerColors: [],
+      enemyHouses: [],
+      forcedOptions,
+      forcedSpawnIniOptions: {}
+    })
+  }
+  return result
 }

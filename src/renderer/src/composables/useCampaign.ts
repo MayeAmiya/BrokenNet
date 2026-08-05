@@ -247,6 +247,7 @@ async function launchMission(
   exe: string
 ): Promise<{ ok: boolean; error?: string }> {
   let gameDir = gameDirIn
+  let mapsPath: string | undefined
 
   // 构建当前播放集的 playground 工作区（战役也从 playground 运行）
   const gameId = config.value?.gameId
@@ -257,6 +258,7 @@ async function launchMission(
       return { ok: false, error: applyResult.error ?? '工作区构建失败' }
     }
     gameDir = applyResult.playgroundPath
+    mapsPath = applyResult.mapsPath
   }
 
   const diffMap = { easy: 0, medium: 1, hard: 2 }
@@ -284,7 +286,8 @@ async function launchMission(
       requiredAddon: mission.requiredAddon,
       buildOffAlly: mission.buildOffAlly,
       useYrMode: true,
-      gameSpeed: 1
+      gameSpeed: 1,
+      mpMapsPath: mapsPath
     }
   })
 

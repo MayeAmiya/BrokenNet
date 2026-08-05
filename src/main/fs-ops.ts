@@ -1,7 +1,6 @@
 import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
-import { link, unlink, stat, mkdir, cp, writeFile, readFile, readdir } from 'node:fs/promises'
-import { dirname, join, basename } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { link, unlink, stat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { app } from 'electron'
 
 export interface LinkResult {
@@ -55,10 +54,8 @@ export function registerFsHandlers(): void {
     createHardLink(src, dest, overwrite)
   )
   ipcMain.handle('fs:link-count', (_e, path: string) => linkCount(path))
-  ipcMain.handle('fs:import-mod', (e) => importMod(e.sender))
-  ipcMain.handle('fs:open-mods-dir', () => openModsDir())
-  ipcMain.handle('fs:open-maps-dir', () => openDir('maps'))
-  ipcMain.handle('fs:open-replays-dir', () => openDir('replay'))
+  ipcMain.handle('fs:open-maps-dir', (_e, gameId: string) => openDir(gameId, 'maps'))
+  ipcMain.handle('fs:open-replays-dir', (_e, gameId: string) => openDir(gameId, 'replay'))
   ipcMain.handle('fs:list-maps', (_e, gameId: string) => listDirFiles(gameId, 'maps'))
   ipcMain.handle('fs:list-replays', (_e, gameId: string) => listDirFiles(gameId, 'replay'))
   ipcMain.handle('fs:select-directory', (e) => selectDirectory(e.sender))
@@ -88,93 +85,15 @@ export function registerFsHandlers(): void {
   ipcMain.handle('fs:load-all-games', () => loadAllGames())
 }
 
-interface ModFingerprint {
-  id: string
-  name: string
-  importedAt: string
-}
-
-/**
- * 导入 MOD。弹出系统选择框，支持选文件或文件夹。
- * - 文件夹：直接复制到 mods/custom/<文件夹名>
- * - 文件：创建 mods/custom/<文件名无后缀>/ 目录，把文件放进去，并写入 mod-fingerprint.json
- */
-async function importMod(webContents: Electron.WebContents): Promise<{ ok: boolean; error?: string; count?: number }> {
-  try {
-    const win = BrowserWindow.fromWebContents(webContents)
-    if (!win) return { ok: false, error: '无法获取窗口' }
-
-    const result = await dialog.showOpenDialog(win, {
-      title: '导入 MOD',
-      properties: ['openFile', 'openDirectory', 'multiSelections']
-    })
-
-    if (result.canceled || !result.filePaths.length) {
-      return { ok: false, error: '已取消' }
-    }
-
-    // mods/custom 目录（相对于应用根目录，实际项目里应该从配置读）
-    const customDir = join(process.cwd(), 'mods', 'custom')
-    await mkdir(customDir, { recursive: true })
-
-    let count = 0
-
-    for (const filePath of result.filePaths) {
-      const s = await stat(filePath)
-      const name = basename(filePath)
-
-      if (s.isDirectory()) {
-        // 文件夹：直接复制
-        const dest = join(customDir, name)
-        await cp(filePath, dest, { recursive: true })
-      } else {
-        // 文件：创建同名目录，放入文件，写入指纹
-        const dirName = name.replace(/\.[^.]+$/, '')
-        const destDir = join(customDir, dirName)
-        await mkdir(destDir, { recursive: true })
-        await cp(filePath, join(destDir, name))
-
-        const fingerprint: ModFingerprint = {
-          id: randomUUID(),
-          name: dirName,
-          importedAt: new Date().toISOString()
-        }
-        await writeFile(join(destDir, 'mod-fingerprint.json'), JSON.stringify(fingerprint, null, 2))
-      }
-      count++
-    }
-
-    return { ok: true, count }
-  } catch (e) {
-    const err = e as NodeJS.ErrnoException
-    return { ok: false, error: err.message }
-  }
-}
-
-/** 用系统资源管理器打开 mods/custom 目录 */
-async function openModsDir(): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const customDir = join(process.cwd(), 'mods', 'custom')
-    await mkdir(customDir, { recursive: true })
-    await shell.openPath(customDir)
-    return { ok: true }
-  } catch (e) {
-    const err = e as NodeJS.ErrnoException
-    return { ok: false, error: err.message }
-  }
-}
-
-/** 用系统资源管理器打开指定子目录（maps/replay等） */
-async function openDir(subDir: string): Promise<{ ok: boolean; error?: string }> {
+/** 用系统资源管理器打开指定游戏的子目录（maps/replay等） */
+async function openDir(gameId: string, subDir: string): Promise<{ ok: boolean; error?: string }> {
   try {
     const resourceDir = await getConfig('resourceDir')
     if (!resourceDir) {
       return { ok: false, error: '请先在设置中选择资源目录' }
     }
 
-    // 获取当前游戏ID（需要从渲染进程传过来，或者用其他方式）
-    // 这里暂时用资源目录根目录
-    const dir = join(resourceDir, subDir)
+    const dir = join(resourceDir, gameId, subDir)
     await mkdir(dir, { recursive: true })
     await shell.openPath(dir)
     return { ok: true }
@@ -358,7 +277,7 @@ async function createGameDirs(gameConfig: GameConfig): Promise<{ ok: boolean; er
     }
 
     const gameDir = join(resourceDir, gameConfig.id)
-    const dirs = ['mods', 'replay', 'save', 'maps']
+    const dirs = ['packages', 'replay', 'save', 'maps']
 
     // 创建子目录
     for (const dir of dirs) {

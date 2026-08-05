@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import type { Room, RoomPlayer, ChatMessage } from '@renderer/types/lobby'
 import { MP_COLORS, SIDES, TEAMS } from '@renderer/types/lobby'
 import MapPreview from '@renderer/components/MapPreview.vue'
@@ -252,6 +252,7 @@ function pickStartLocation(waypoint: number): void {
 watch(selectedMap, async (mapName) => {
   if (!mapName || !props.gamePath) { clearPreview(); return }
   const filePath = props.getMapFilePath ? props.getMapFilePath(mapName) : mapName
+  console.log('[RoomDetail] loadPreview:', { mapName, filePath, gamePath: props.gamePath })
   await loadPreview(props.gamePath, filePath)
 }, { immediate: true })
 
@@ -259,6 +260,16 @@ watch(selectedMap, async (mapName) => {
 watch(() => props.room.map, (m) => {
   if (m && m !== selectedMap.value) {
     selectedMap.value = m
+  }
+})
+
+// 切 tab 回来 RoomDetail 重挂载：显式重新加载当前地图预览（不依赖 watch 即时触发）
+onMounted(() => {
+  const m = selectedMap.value || props.room.map
+  if (m && props.gamePath) {
+    const filePath = props.getMapFilePath ? props.getMapFilePath(m) : m
+    console.log('[RoomDetail] onMounted loadPreview:', { mapName: m, filePath })
+    void loadPreview(props.gamePath, filePath)
   }
 })
 

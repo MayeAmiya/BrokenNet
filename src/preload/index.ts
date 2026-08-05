@@ -20,14 +20,10 @@ const api = {
     ): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:hardlink', src, dest, overwrite),
     linkCount: (path: string): Promise<number> => ipcRenderer.invoke('fs:link-count', path),
-    importMod: (): Promise<{ ok: boolean; error?: string; count?: number }> =>
-      ipcRenderer.invoke('fs:import-mod'),
-    openModsDir: (): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('fs:open-mods-dir'),
-    openMapsDir: (): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('fs:open-maps-dir'),
-    openReplaysDir: (): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('fs:open-replays-dir'),
+    openMapsDir: (gameId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:open-maps-dir', gameId),
+    openReplaysDir: (gameId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:open-replays-dir', gameId),
     listMaps: (gameId: string): Promise<{
       ok: boolean
       files: Array<{ name: string; path: string; size: number }>
@@ -97,27 +93,6 @@ const api = {
       ipcRenderer.invoke('mod:pause-download', modName),
     cancelDownload: (modName: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('mod:cancel-download', modName),
-    listInstalled: (gameId: string): Promise<{
-      ok: boolean
-      mods: Array<{ name: string; path: string }>
-    }> => ipcRenderer.invoke('mod:list-installed', gameId),
-    delete: (gameId: string, modName: string): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('mod:delete', gameId, modName),
-    ensureDefaultModSet: (gameId: string): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('mod:ensure-default-modset', gameId),
-    loadModSets: (gameId: string): Promise<{
-      ok: boolean
-      modSets: Array<{ id: string; name: string; description: string; background?: string; mods: Array<{ id: string; name: string }> }>
-      error?: string
-    }> => ipcRenderer.invoke('mod:load-modsets', gameId),
-    saveModSets: (gameId: string, modSets: Array<{
-      id: string
-      name: string
-      description: string
-      background?: string
-      mods: Array<{ id: string; name: string }>
-    }>): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('mod:save-modsets', gameId, modSets),
     getVersion: (gameId: string, modName: string): Promise<{ ok: boolean; version: string }> =>
       ipcRenderer.invoke('mod:get-version', gameId, modName),
     setVersion: (gameId: string, modName: string, version: string): Promise<{ ok: boolean; error?: string }> =>
@@ -136,6 +111,31 @@ const api = {
         ipcRenderer.removeListener('mod:download-progress', handler)
       }
     }
+  },
+  package: {
+    list: (gameId: string): Promise<{ ok: boolean; packages: Array<{ name: string; path: string }>; error?: string }> =>
+      ipcRenderer.invoke('package:list', gameId),
+    importFolder: (gameId: string): Promise<{ ok: boolean; imported?: string[]; error?: string }> =>
+      ipcRenderer.invoke('package:import-folder', gameId),
+    importArchive: (gameId: string): Promise<{ ok: boolean; imported?: string[]; error?: string }> =>
+      ipcRenderer.invoke('package:import-archive', gameId),
+    importPaths: (gameId: string, paths: string[]): Promise<{ ok: boolean; imported?: string[]; error?: string }> =>
+      ipcRenderer.invoke('package:import-paths', gameId, paths),
+    delete: (gameId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('package:delete', gameId, name)
+  },
+  sound: {
+    read: (gameId: string): Promise<Record<string, number>> => ipcRenderer.invoke('sound:read', gameId),
+    write: (gameId: string, values: Record<string, number>): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('sound:write', gameId, values)
+  },
+  modset: {
+    list: (gameId: string): Promise<{ ok: boolean; modSets: Array<{ id: string; name: string; description: string; background?: string; packages: Array<{ id: string; name: string }> }>; error?: string }> =>
+      ipcRenderer.invoke('modset:list', gameId),
+    save: (gameId: string, modSets: Array<{ id: string; name: string; description: string; background?: string; packages: Array<{ id: string; name: string }> }>): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('modset:save', gameId, modSets),
+    ensureDefault: (gameId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('modset:ensure-default', gameId)
   },
   options: {
     read: (gameType: 'zh' | 'gen'): Promise<{
@@ -459,7 +459,7 @@ const api = {
   },
   playground: {
     apply: (gameId: string, modSetId: string): Promise<{
-      ok: boolean; playgroundPath?: string; error?: string
+      ok: boolean; playgroundPath?: string; mapsPath?: string; error?: string
     }> => ipcRenderer.invoke('playground:apply', gameId, modSetId),
     onProgress: (callback: (data: { percent: number; label: string }) => void) => {
       const handler = (_e: Electron.IpcRendererEvent, data: { percent: number; label: string }) => callback(data)
@@ -596,16 +596,16 @@ const api = {
     }> => ipcRenderer.invoke('renderer:apply', gamePath, resourcesPath, rendererKey),
     clean: (gamePath: string, resourcesPath: string, rendererKey: string): Promise<void> =>
       ipcRenderer.invoke('renderer:clean', gamePath, resourcesPath, rendererKey),
-    writeWindowed: (gamePath: string, resourcesPath: string, rendererKey: string, windowed: boolean, borderless: boolean): Promise<boolean> =>
-      ipcRenderer.invoke('renderer:write-windowed', gamePath, resourcesPath, rendererKey, windowed, borderless),
+    writeWindowed: (gamePath: string, resourcesPath: string, rendererKey: string, windowed: boolean, borderless: boolean, gameId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('renderer:write-windowed', gamePath, resourcesPath, rendererKey, windowed, borderless, gameId),
     readWindowed: (gamePath: string, rendererKey: string): Promise<{ windowed: boolean; borderless: boolean }> =>
       ipcRenderer.invoke('renderer:read-windowed', gamePath, rendererKey),
     usesCustomWindowed: (rendererKey: string, resourcesPath: string): Promise<boolean> =>
       ipcRenderer.invoke('renderer:uses-custom-windowed', rendererKey, resourcesPath),
     readResolution: (gamePath: string, rendererKey: string): Promise<{ width: number; height: number } | null> =>
       ipcRenderer.invoke('renderer:read-resolution', gamePath, rendererKey),
-    writeResolution: (gamePath: string, resourcesPath: string, rendererKey: string, width: number, height: number): Promise<boolean> =>
-      ipcRenderer.invoke('renderer:write-resolution', gamePath, resourcesPath, rendererKey, width, height)
+    writeResolution: (gamePath: string, resourcesPath: string, rendererKey: string, width: number, height: number, gameId?: string): Promise<boolean> =>
+      ipcRenderer.invoke('renderer:write-resolution', gamePath, resourcesPath, rendererKey, width, height, gameId)
   },
   forcedSpawn: {
     global: (gamePath: string): Promise<Array<{ key: string; value: string }>> =>
@@ -631,7 +631,7 @@ const api = {
     }>> => ipcRenderer.invoke('gamemode:load', gamePath)
   },
   maps: {
-    load: (gamePath: string): Promise<Array<{
+    load: (gamePath: string, gameId?: string): Promise<Array<{
       filePath: string; baseFilePath: string; description: string
       gameModes: string[]; minPlayers: number; maxPlayers: number
       enforceMaxPlayers: boolean; size: string; localSize: string; previewSize: string
@@ -641,7 +641,13 @@ const api = {
       enemyHouses: string[]; forcedOptions: Record<string, string>
       forcedSpawnIniOptions: Record<string, string>
       extraIniName?: string; baseSection?: string
-    }>> => ipcRenderer.invoke('maps:load', gamePath),
+    }>> => ipcRenderer.invoke('maps:load', gamePath, gameId),
+    import: (gameId: string): Promise<{ ok: boolean; imported?: string[]; error?: string }> =>
+      ipcRenderer.invoke('maps:import', gameId),
+    delete: (gameId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('maps:delete', gameId, name),
+    listLibrary: (gameId: string): Promise<{ ok: boolean; maps: Array<{ id: string; name: string; path: string; size: number }>; error?: string }> =>
+      ipcRenderer.invoke('maps:list-library', gameId),
     findByHash: (gamePath: string, mapHash: string): Promise<{ filePath: string; baseFilePath: string; description: string } | null> =>
       ipcRenderer.invoke('map:find-by-hash', gamePath, mapHash),
     hashByName: (gamePath: string, mapName: string): Promise<string> =>
@@ -686,8 +692,8 @@ const api = {
     }>> => ipcRenderer.invoke('keyboard:load', gamePath),
     getMappings: (gamePath: string): Promise<Record<string, string>> =>
       ipcRenderer.invoke('keyboard:mappings', gamePath),
-    save: (gamePath: string, bindings: Array<{ command: string; currentKey: string; defaultKey: string }>): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('keyboard:save', gamePath, bindings)
+    save: (gamePath: string, bindings: Array<{ command: string; currentKey: string; defaultKey: string }>, gameId?: string): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('keyboard:save', gamePath, bindings, gameId)
   },
   integrity: {
     check: (gamePath: string): Promise<Array<{ file: string; exists: boolean; required: boolean }>> =>

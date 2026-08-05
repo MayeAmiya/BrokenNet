@@ -14,7 +14,7 @@ import {
   chatColorHex, autoReady, realDropdowns, realCheckboxes, allRealCheckboxes,
   dropdownValues, checkboxValues, forcedSpawnIniOptions, launcherPlayers, channelError,
   realRandomSelectors, realRandomSelectorCount, realFactionCount, realSides, realMpColors,
-  roomSubsRegistered, cleanupFns, defaultFrameSendRate,
+  roomSubsRegistered, cleanupFns, defaultFrameSendRate, currentPlaygroundPath,
   type ChatMode, type PrivateChatTarget, type ConnLogEntry, type ConnAttemptEntry
 } from './lobby-state'
 export type { ChatMode, PrivateChatTarget } from './lobby-state'
@@ -1225,7 +1225,8 @@ export function useLobby() {
         port: myPort || undefined,
         tunnel: { ip: tunIp, port: tunPort },
         otherPlayers,
-        extraSettings: spawnIniSettings
+        extraSettings: spawnIniSettings,
+        mpMapsPath: applyResult.mapsPath // 独立地图库（下载地图）目录，写 spawn.ini MPMapsPath
       }
     })
     console.log(`[launch] isHost=${isHost} room.randomSeed=${room.randomSeed} -> spawn.ini Seed=${room.randomSeed ?? Math.floor(Math.random() * 99999999)}`)
@@ -1308,6 +1309,7 @@ export function useLobby() {
         uiGameMode: room.gameMode,
         uiMapName: room.map,
         extraSettings: spawnIniSettings,
+        mpMapsPath: applyResult.mapsPath,
         seed: Math.floor(Math.random() * 99999999)
       }
     })
@@ -2044,12 +2046,28 @@ export function useLobby() {
   const realModeUiNameMap = ref<Record<string, string>>({}) // internalName -> uiName
   const realMapFilePaths = ref<Record<string, string>>({})
 
-  async function loadRealData(gamePath: string): Promise<void> {
+  /** 用播放集构建 playground 并记录路径（进入游戏页/切换播放集时调用；硬链接，重建快） */
+  async function buildPlayground(gameId: string, modSetId: string): Promise<string | null> {
+    try {
+      const res = await window.api.playground.apply(gameId, modSetId)
+      if (res.ok && res.playgroundPath) {
+        currentPlaygroundPath.value = res.playgroundPath
+        return res.playgroundPath
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  async function loadRealData(gamePath: string, gameId?: string): Promise<void> {
     try {
       const api = (window as any).api
+      // 数据源优先用当前播放集的 playground（包里带的地图/模式/选项才可见）；未建时回退安装目录
+      const source = currentPlaygroundPath.value || gamePath
       const [mapsData, modesData] = await Promise.all([
-        api.maps.load(gamePath),
-        api.gameMode.load(gamePath)
+        api.maps.load(source, gameId), // gameId 用于合并独立地图库（下载地图）
+        api.gameMode.load(source)
       ])
       realModesData.value = modesData
       realMapsData.value = mapsData
@@ -2074,7 +2092,7 @@ export function useLobby() {
       realMapFilePaths.value = lookup
       // 阵营/颜色映射 + 游戏选项（房间内 OR/PO 打包 + 完整 GO）
       try {
-        const opts = await api.mpLobbyOptions.load(gamePath)
+        const opts = await api.mpLobbyOptions.load(source)
         realSides.value = opts.sides
         realMpColors.value = opts.mpColors
         realDropdowns.value = opts.dropdowns
@@ -2202,6 +2220,8 @@ export function useLobby() {
   return {
     rooms,
     currentRoom,
+    currentPlaygroundPath,
+    buildPlayground,
     friends,
     isLoading,
     cncnetConnected,

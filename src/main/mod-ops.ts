@@ -4,12 +4,10 @@
  * 主清单地址：https://raw.githubusercontent.com/p0ls3r/GenLauncherModsData/master/ReposModificationDataZH4.yaml
  */
 import { ipcMain, net } from 'electron'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { createWriteStream } from 'node:fs'
-import { mkdir, stat, rename, unlink, readdir, readFile, rm, writeFile, cp } from 'node:fs/promises'
-import { dirname, join, basename } from 'node:path'
-import { existsSync } from 'node:fs'
+import { mkdir, stat, rename, unlink, readFile, rm, writeFile } from 'node:fs/promises'
+import { join, dirname } from 'node:path'
+import { extractArchive } from './archive'
 
 // 下载控制
 const downloadControllers = new Map<string, AbortController>()
@@ -441,48 +439,8 @@ async function writeResponseToFile(
   return { ok: true }
 }
 
-/** 查找 7z.exe 路径 */
-async function find7zExe(): Promise<string> {
-  const candidates = [
-    // 打包后 resources 目录
-    join(process.resourcesPath || process.cwd(), '7z.exe'),
-    // 开发模式
-    join(process.cwd(), 'resources', '7z.exe'),
-    // 系统安装
-    'C:\\Program Files\\7-Zip\\7z.exe',
-    'C:\\Program Files (x86)\\7-Zip\\7z.exe'
-  ]
-  for (const p of candidates) {
-    try {
-      await stat(p)
-      return p
-    } catch { /* 不存在 */ }
-  }
-  throw new Error('未找到 7z.exe，请安装 7-Zip：https://7-zip.org')
-}
-
-/** 解压 RAR/ZIP/7Z 文件（统一用 7z.exe） */
-async function extractArchive(archivePath: string, destDir: string): Promise<void> {
-  await mkdir(destDir, { recursive: true })
-  await stat(archivePath)
-
-  console.log(`[解压] ${archivePath} -> ${destDir}`)
-
-  const binPath = await find7zExe()
-  console.log(`[解压] 7z: ${binPath}`)
-
-  const execFileAsync = promisify(execFile)
-  try {
-    await execFileAsync(binPath, ['x', archivePath, `-o${destDir}`, '-y'])
-    console.log('[解压] 完成')
-  } catch (e) {
-    console.error('[解压] 失败:', (e as Error).message)
-    throw new Error(`解压失败: ${(e as Error).message}`)
-  }
-}
-
-/** 获取资源目录下的 MOD 存储路径 */
-async function getModsDir(gameId: string): Promise<string> {
+/** 获取资源目录下的包存储路径（repo 下载落盘到 packages/） */
+async function getPackagesDir(gameId: string): Promise<string> {
   const { app } = await import('electron')
   const configPath = join(app.getPath('userData'), 'config.json')
   try {
@@ -490,138 +448,13 @@ async function getModsDir(gameId: string): Promise<string> {
     const config = JSON.parse(data) as Record<string, string>
     const resourceDir = config.resourceDir
     if (resourceDir) {
-      return join(resourceDir, gameId, 'mods')
+      return join(resourceDir, gameId, 'packages')
     }
   } catch {
     // 配置不存在
   }
   // 回退到应用目录
-  return join(process.cwd(), 'mods')
-}
-
-/** 播放集数据结构 */
-interface ModSetData {
-  id: string
-  name: string
-  description: string
-  background?: string
-  mods: Array<{ id: string; name: string }>
-}
-
-/** 获取播放集文件路径 */
-async function getModSetsPath(gameId: string): Promise<string | null> {
-  const { app } = await import('electron')
-  const configPath = join(app.getPath('userData'), 'config.json')
-  try {
-    const data = await readFile(configPath, 'utf-8')
-    const config = JSON.parse(data) as Record<string, string>
-    const resourceDir = config.resourceDir
-    if (resourceDir) {
-      return join(resourceDir, gameId, 'modsets.json')
-    }
-  } catch { /* 无配置 */ }
-  return null
-}
-
-/** 加载播放集 */
-async function loadModSets(gameId: string): Promise<{ ok: boolean; modSets: ModSetData[]; error?: string }> {
-  try {
-    const path = await getModSetsPath(gameId)
-    if (!path) return { ok: true, modSets: [] }
-    const data = await readFile(path, 'utf-8')
-    const modSets = JSON.parse(data) as ModSetData[]
-    return { ok: true, modSets }
-  } catch {
-    return { ok: true, modSets: [] }
-  }
-}
-
-/** 保存播放集 */
-async function saveModSets(gameId: string, modSets: ModSetData[]): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const path = await getModSetsPath(gameId)
-    if (!path) return { ok: false, error: '请先设置资源目录' }
-    await mkdir(dirname(path), { recursive: true })
-    await writeFile(path, JSON.stringify(modSets, null, 2), 'utf-8')
-    return { ok: true }
-  } catch (e) {
-    const err = e as NodeJS.ErrnoException
-    return { ok: false, error: err.message }
-  }
-}
-
-/** 从 game.ini 读游戏安装目录 */
-async function getInstallPath(gameId: string): Promise<string> {
-  const modsDir = await getModsDir(gameId)
-  const gameIniPath = join(modsDir, '..', 'game.ini')
-  try {
-    const data = await readFile(gameIniPath, 'utf-8')
-    for (const line of data.split(/\r?\n/)) {
-      const m = line.match(/^installPath=(.*)$/)
-      if (m) return m[1].trim()
-    }
-  } catch { /* 不存在 */ }
-  return ''
-}
-
-/** 复制游戏本体时排除的运行时写目录（MentalOmega mod 只含只读资源） */
-const GAME_COPY_EXCLUDE = new Set([
-  'UserData', 'Saved Games', 'Screenshots', 'Client', 'EasyAntiCheat',
-  'plugins', 'GeneralsOnlineGameData', 'Map Editor', 'Resources',
-  'Logs', 'SettingsCache', 'tunnel_cache', 'ClientCrashLogs'
-])
-
-/**
- * 确保默认"原版"播放集存在：mods 只含 MentalOmega（游戏本体视为 mod）。
- * - 没有 mods/MentalOmega 时，从游戏安装目录复制游戏本体过去
- * - 没有"原版"播放集时，创建它
- * 幂等：已存在则不动。
- */
-async function ensureDefaultModSet(gameId: string): Promise<{ ok: boolean; error?: string }> {
-  try {
-    const modsDir = await getModsDir(gameId)
-    const mentalDir = join(modsDir, 'MentalOmega')
-
-    // 1. 确保 mods/MentalOmega 存在（游戏本体作为 mod）
-    if (!existsSync(mentalDir)) {
-      const installPath = await getInstallPath(gameId)
-      if (installPath && existsSync(installPath)) {
-        await cp(installPath, mentalDir, {
-          recursive: true,
-          filter: (src) => {
-            const name = basename(src)
-            return !GAME_COPY_EXCLUDE.has(name)
-          }
-        })
-        console.log(`[Mods] 已复制游戏本体 -> ${mentalDir}`)
-      } else {
-        await mkdir(mentalDir, { recursive: true })
-      }
-    }
-
-    // 2. 确保"原版"播放集存在（mods 只含 MentalOmega）
-    const path = await getModSetsPath(gameId)
-    if (path) {
-      let modSets: ModSetData[] = []
-      try { modSets = JSON.parse(await readFile(path, 'utf-8')) } catch { /* 无播放集 */ }
-      const vanilla = modSets.find((m) => m.id === 'vanilla')
-      if (!vanilla) {
-        modSets.unshift({
-          id: 'vanilla',
-          name: '原版',
-          description: '只加载游戏本体（MentalOmega）',
-          mods: [{ id: 'MentalOmega', name: 'MentalOmega' }]
-        })
-        await mkdir(dirname(path), { recursive: true })
-        await writeFile(path, JSON.stringify(modSets, null, 2), 'utf-8')
-        console.log('[Mods] 已创建默认"原版"播放集（MentalOmega）')
-      }
-    }
-    return { ok: true }
-  } catch (e) {
-    const err = e as Error
-    return { ok: false, error: err.message }
-  }
+  return join(process.cwd(), 'packages')
 }
 
 /** 注册 MOD 相关 IPC 处理器 */
@@ -653,7 +486,7 @@ export function registerModHandlers(): void {
 
   // 下载 MOD
   ipcMain.handle('mod:download', async (e, url: string, gameId: string, modName: string) => {
-    const modsDir = await getModsDir(gameId)
+    const modsDir = await getPackagesDir(gameId)
     const modDir = join(modsDir, modName)
     const tempDir = join(modsDir, `${modName}.downloading`)
 
@@ -757,36 +590,6 @@ export function registerModHandlers(): void {
     }
   })
 
-  // 获取已安装的 MOD 列表
-  ipcMain.handle('mod:list-installed', async (_e, gameId: string) => {
-    try {
-      const modsDir = await getModsDir(gameId)
-      const entries = await readdir(modsDir, { withFileTypes: true })
-      const mods = entries
-        .filter((e) => e.isDirectory())
-        .map((e) => ({
-          name: e.name,
-          path: join(modsDir, e.name)
-        }))
-      return { ok: true, mods }
-    } catch (e) {
-      return { ok: true, mods: [] }
-    }
-  })
-
-  // 删除 MOD
-  ipcMain.handle('mod:delete', async (_e, gameId: string, modName: string) => {
-    try {
-      const modsDir = await getModsDir(gameId)
-      const modDir = join(modsDir, modName)
-      await rm(modDir, { recursive: true, force: true })
-      return { ok: true }
-    } catch (e) {
-      const err = e as Error
-      return { ok: false, error: err.message }
-    }
-  })
-
   // 暂停下载
   ipcMain.handle('mod:pause-download', async (_e, modName: string) => {
     pauseDownload(modName)
@@ -799,31 +602,10 @@ export function registerModHandlers(): void {
     return { ok: true }
   })
 
-  // 确保默认"原版"播放集存在（游戏本体作为 mod）
-  ipcMain.handle('mod:ensure-default-modset', async (_e, gameId: string) => {
-    return ensureDefaultModSet(gameId)
-  })
-
-  // 加载播放集
-  ipcMain.handle('mod:load-modsets', async (_e, gameId: string) => {
-    return loadModSets(gameId)
-  })
-
-  // 保存播放集
-  ipcMain.handle('mod:save-modsets', async (_e, gameId: string, modSets: Array<{
-    id: string
-    name: string
-    description: string
-    background?: string
-    mods: Array<{ id: string; name: string }>
-  }>) => {
-    return saveModSets(gameId, modSets)
-  })
-
   // 读取 MOD 版本号
   ipcMain.handle('mod:get-version', async (_e, gameId: string, modName: string) => {
     try {
-      const modsDir = await getModsDir(gameId)
+      const modsDir = await getPackagesDir(gameId)
       const versionPath = join(modsDir, modName, 'version.txt')
       const version = await readFile(versionPath, 'utf-8')
       return { ok: true, version: version.trim() }
@@ -835,7 +617,7 @@ export function registerModHandlers(): void {
   // 写入 MOD 版本号
   ipcMain.handle('mod:set-version', async (_e, gameId: string, modName: string, version: string) => {
     try {
-      const modsDir = await getModsDir(gameId)
+      const modsDir = await getPackagesDir(gameId)
       const versionPath = join(modsDir, modName, 'version.txt')
       await mkdir(dirname(versionPath), { recursive: true })
       await writeFile(versionPath, version, 'utf-8')

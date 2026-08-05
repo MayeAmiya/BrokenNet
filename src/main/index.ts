@@ -8,6 +8,10 @@ try { appendFileSync('crash.log', `[${new Date().toISOString()}] main process st
 
 import { registerFsHandlers } from './fs-ops'
 import { registerModHandlers } from './mod-ops'
+import { registerPackageHandlers } from './package-ops'
+import { registerMapLibraryHandlers } from './map-library-ops'
+import { registerSoundHandlers } from './sound-ops'
+import { getSettingsDir } from './resource-dir'
 import { registerOptionsHandlers } from './options-ops'
 import { launchGame, isGameRunning, getGamePid } from './game-launcher'
 import { cncnet, CNCNET_GAMES } from './cncnet'
@@ -21,7 +25,7 @@ import { readClientConfig, readDTACnCNetConfig } from './client-config-reader'
 import { loadWindowLayout } from './ini-layout-parser'
 import { applyRenderer, cleanRenderer, writeRendererWindowedMode, readRendererWindowedMode, rendererUsesCustomWindowedOption, readRendererResolution, writeRendererResolution } from './renderer-manager'
 import { readGlobalForcedSpawnOptions, readGameModeForcedSpawnOptions, applyAllForcedSpawnOptions, generateSpawnIni } from './forced-spawn-options'
-import { loadGameModes, loadMaps } from './gamemode-reader'
+import { loadGameModes, loadMaps, loadLibraryMaps } from './gamemode-reader'
 import { applyMapCode, getMapCodeFiles } from './map-code-helper'
 import { findMapFileByName } from './map-preview'
 import { loadMapPreviewData, loadMapPreviewByName, findMapByHash, findMapInfoByHash, findMapHashByName } from './map-preview'
@@ -446,9 +450,11 @@ function registerIniHandlers(): void {
     cleanRenderer(gamePath, resourcesPath, rendererKey, ini)
   })
 
-  ipcMain.handle('renderer:write-windowed', (_event, gamePath: string, resourcesPath: string, rendererKey: string, windowed: boolean, borderless: boolean) => {
+  ipcMain.handle('renderer:write-windowed', async (_event, gamePath: string, resourcesPath: string, rendererKey: string, windowed: boolean, borderless: boolean, gameId?: string) => {
     const ini = loadIniFile(require('path').join(resourcesPath, 'Renderers.ini'))
-    return writeRendererWindowedMode(gamePath, resourcesPath, rendererKey, ini, windowed, borderless)
+    // 全局设置：有 gameId 就写 settings/（playground 硬链接）
+    const settingsDir = gameId ? await getSettingsDir(gameId) : undefined
+    return writeRendererWindowedMode(gamePath, resourcesPath, rendererKey, ini, windowed, borderless, settingsDir)
   })
 
   ipcMain.handle('renderer:read-windowed', (_event, gamePath: string, rendererKey: string) => {
@@ -468,9 +474,10 @@ function registerIniHandlers(): void {
     return readRendererResolution(gamePath, rendererKey, ini)
   })
 
-  ipcMain.handle('renderer:write-resolution', (_event, gamePath: string, resourcesPath: string, rendererKey: string, width: number, height: number) => {
+  ipcMain.handle('renderer:write-resolution', async (_event, gamePath: string, resourcesPath: string, rendererKey: string, width: number, height: number, gameId?: string) => {
     const ini = loadIniFile(require('path').join(resourcesPath, 'Renderers.ini'))
-    return writeRendererResolution(gamePath, resourcesPath, rendererKey, ini, width, height)
+    const settingsDir = gameId ? await getSettingsDir(gameId) : undefined
+    return writeRendererResolution(gamePath, resourcesPath, rendererKey, ini, width, height, settingsDir)
   })
 
   // ForcedSpawnIniOptions
@@ -495,8 +502,14 @@ function registerIniHandlers(): void {
     return loadGameModes(gamePath)
   })
 
-  ipcMain.handle('maps:load', (_event, gamePath: string) => {
-    return loadMaps(gamePath)
+  ipcMain.handle('maps:load', async (_event, gamePath: string, gameId?: string) => {
+    const installMaps = loadMaps(gamePath)
+    // 合并独立地图库（下载地图，文件夹包）
+    if (gameId) {
+      const libraryMaps = await loadLibraryMaps(gameId)
+      return [...installMaps, ...libraryMaps]
+    }
+    return installMaps
   })
 
   // Map code：原 .map 只读，应用后写到 <gamePath>/spawnmap.ini（对齐 xna WriteMap）
@@ -565,8 +578,9 @@ function registerIniHandlers(): void {
     return loadKeyMappings(gamePath)
   })
 
-  ipcMain.handle('keyboard:save', (_event, gamePath: string, bindings: Array<{ command: string; currentKey: string; defaultKey: string }>) => {
-    writeKeyMappings(gamePath, bindings)
+  ipcMain.handle('keyboard:save', async (_event, gamePath: string, bindings: Array<{ command: string; currentKey: string; defaultKey: string }>, gameId?: string) => {
+    const settingsDir = gameId ? await getSettingsDir(gameId) : undefined
+    writeKeyMappings(gamePath, bindings, settingsDir)
     return { ok: true }
   })
 
@@ -661,6 +675,9 @@ if (!app.requestSingleInstanceLock()) {
       registerMapPreviewHandlers()
       registerFsHandlers()
       registerModHandlers()
+      registerPackageHandlers()
+      registerMapLibraryHandlers()
+      registerSoundHandlers()
       registerOptionsHandlers()
       registerIniHandlers()
       createWindow()

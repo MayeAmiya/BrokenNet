@@ -95,6 +95,11 @@ export const forcedSpawnIniOptions = ref<Record<string, string>>({})
 export const launcherPlayers = new Set<string>()
 /** 默认帧发送率（对齐 xna ClientConfiguration.DefaultFrameSendRate=7；连接时从 ClientDefinitions.ini 加载） */
 export const defaultFrameSendRate = ref(7)
+/**
+ * 当前播放集构建出的 playground 路径（固定 resourceDir/<gameId>/playground）。
+ * 启用播放集时重建后写入；大厅/房间/战役数据源用它（包里带的地图/模式/战役才可见）。
+ */
+export const currentPlaygroundPath = ref('')
 /** 频道加入失败（如被拉黑 +b）——连接状态要显示警告而不是绿色 */
 export const channelError = ref('')
 /** 子阵营随机选择器 → 覆盖的具体阵营索引（如 任一苏联=[3,4,5]） */

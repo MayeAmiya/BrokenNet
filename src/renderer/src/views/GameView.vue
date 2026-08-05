@@ -4,6 +4,7 @@ import type { GameProfile } from '@renderer/types/profile'
 import type { RepoMod, ModManifest } from '@renderer/types/mod'
 import type { IniRendererDef, IniGameCheckBoxOption, IniGameDropDownOption } from '@renderer/types/ini-layout'
 import { useToast } from '@renderer/composables/useToast'
+import { currentPlaygroundPath } from '@renderer/composables/lobby-state'
 import { useGameConfig } from '@renderer/composables/useGameConfig'
 import { useNickname } from '@renderer/composables/useNickname'
 import { computeLaunchGameOptions } from '@renderer/composables/gameOptions'
@@ -18,7 +19,7 @@ const emit = defineEmits<{
 }>()
 const status = ref('')
 const launching = ref(false)
-const { success: toastSuccess } = useToast()
+const { success: toastSuccess, error: toastError } = useToast()
 const activeTab = ref('modsets')
 
 // 战役系统
@@ -68,8 +69,8 @@ const tabs = computed(() => {
     { id: 'campaign', label: '单人战役' },
     { id: 'multiplayer', label: '多人联机', disabled: !isMentalOmega.value, tip: !isMentalOmega.value ? '绝命时刻联机暂未支持（ZH 走独立联机逻辑，不复用 MO 的 CnCNet 路径）' : undefined },
     { id: 'replays', label: '统计', disabled: !samePartition.value },
-    { id: 'mods', label: '包管理', disabled: true, tip: '制作中' },
-    { id: 'maps', label: '地图管理', disabled: true, tip: '制作中' },
+    { id: 'mods', label: '包管理' },
+    { id: 'maps', label: '地图管理' },
     { id: 'keyboard', label: '快捷键设置', disabled: !props.profile.installPath, tip: '需要先设置游戏安装目录' },
     { id: 'settings', label: '游戏设置' }
   ]
@@ -427,18 +428,18 @@ async function downloadPatchesAndAddons(mod: RepoMod): Promise<void> {
   await Promise.all(tasks)
 }
 
-// 删除 MOD
+// 删除 MOD（repo 下载的包）
 async function deleteMod(modName: string): Promise<void> {
-  const result = await window.api.mod.delete(props.profile.id, modName)
+  const result = await window.api.package.delete(props.profile.id, modName)
   if (result.ok) {
     // 也删除关联的 patch/addon
     const mod = repoMods.value.find(m => m.ModName === modName)
     if (mod) {
       for (let i = 0; i < mod.ModPatches.length; i++) {
-        await window.api.mod.delete(props.profile.id, `${modName}_patch_${i}`)
+        await window.api.package.delete(props.profile.id, `${modName}_patch_${i}`)
       }
       for (let i = 0; i < mod.ModAddons.length; i++) {
-        await window.api.mod.delete(props.profile.id, `${modName}_addon_${i}`)
+        await window.api.package.delete(props.profile.id, `${modName}_addon_${i}`)
       }
     }
     installedPatchState.value = new Set()
@@ -448,11 +449,54 @@ async function deleteMod(modName: string): Promise<void> {
   }
 }
 
-// 加载已安装 MOD
+// 加载已安装的包（ZH 下载 UI 的"已安装"标记 + 播放集右栏可用包都靠它）
 async function loadInstalledMods(): Promise<void> {
-  const result = await window.api.mod.listInstalled(props.profile.id)
+  const result = await window.api.package.list(props.profile.id)
   if (result.ok) {
-    installedMods.value = result.mods
+    installedMods.value = result.packages
+  }
+}
+
+// 导入文件夹 / 导入压缩包 / 拖拽导入（共用导入结果处理）
+async function handleImportResult(result: { ok: boolean; imported?: string[]; error?: string }): Promise<void> {
+  if (result.ok && result.imported?.length) {
+    toastSuccess(`已导入 ${result.imported.length} 个包`)
+    await loadInstalledMods()
+  } else if (result.error && result.error !== '已取消') {
+    toastError(result.error)
+  }
+}
+
+async function importFolder(): Promise<void> {
+  await handleImportResult(await window.api.package.importFolder(props.profile.id))
+}
+
+async function importArchive(): Promise<void> {
+  await handleImportResult(await window.api.package.importArchive(props.profile.id))
+}
+
+// 拖拽导入：从 e.dataTransfer 提取本地路径（文件夹/压缩包均可）
+async function onDropImport(e: DragEvent): Promise<void> {
+  e.preventDefault()
+  dropActive.value = false
+  const paths: string[] = []
+  for (const f of Array.from(e.dataTransfer?.files ?? [])) {
+    const p = (f as any).path
+    if (p) paths.push(p)
+  }
+  if (paths.length) await handleImportResult(await window.api.package.importPaths(props.profile.id, paths))
+}
+
+const dropActive = ref(false)
+
+// 删除包
+async function deletePackage(name: string): Promise<void> {
+  if (!confirm(`删除包「${name}」？`)) return
+  const result = await window.api.package.delete(props.profile.id, name)
+  if (result.ok) {
+    await loadInstalledMods()
+  } else {
+    toastError(result.error ?? '删除失败')
   }
 }
 
@@ -522,12 +566,12 @@ interface ModSet {
   name: string
   description: string
   background?: string
-  mods: ModItem[]
+  packages: ModItem[]
 }
 
 // 播放集持久化
 async function loadModSets(): Promise<void> {
-  const result = await window.api.mod.loadModSets(props.profile.id)
+  const result = await window.api.modset.list(props.profile.id)
   if (result.ok) {
     modSets.value = result.modSets
     // 恢复上次选中的播放集（已持久化且仍存在才生效）
@@ -539,7 +583,7 @@ async function loadModSets(): Promise<void> {
 }
 
 async function saveModSetsToDisk(): Promise<void> {
-  await window.api.mod.saveModSets(props.profile.id, modSets.value)
+  await window.api.modset.save(props.profile.id, modSets.value)
 }
 
 // 已安装的主 MOD（用于播放集右侧列表，排除 patch/addon 子项）
@@ -550,7 +594,7 @@ const downloadedMods = computed<ModItem[]>(() => {
 })
 
 const modSets = ref<ModSet[]>([
-  { id: 'vanilla', name: '原版', description: '不加载任何 MOD', mods: [] }
+  { id: 'vanilla', name: '原版', description: '不加载任何 MOD', packages: [] }
 ])
 
 const selectedModSetId = ref<string>('vanilla')
@@ -576,13 +620,14 @@ onMounted(async () => {
   await loadNickname()
   nicknameInput.value = onlineNickname.value
   await loadInstalledMods()
-  // 确保默认"原版"播放集存在（游戏本体视为 mod），再加载播放集
-  await window.api.mod.ensureDefaultModSet(props.profile.id)
+  // 确保默认"原版"播放集存在（游戏本体视为包），再加载播放集
+  await window.api.modset.ensureDefault(props.profile.id)
   await loadModSets() // 内部会恢复上次选中的播放集
-  // 初始化战役系统
+  // 首次用当前播放集重建 playground（地图/战役数据源），再初始化战役
+  await rebuildPlayground(selectedModSetId.value)
   switchModSet(selectedModSetId.value)
   if (props.profile.installPath) {
-    loadCampaignData(selectedModSetId.value, props.profile.id, props.profile.installPath)
+    loadCampaignData(selectedModSetId.value, props.profile.id, currentPlaygroundPath.value || props.profile.installPath)
   }
 })
 
@@ -590,7 +635,7 @@ onMounted(async () => {
 watch(selectedModSetId, (id) => {
   switchModSet(id)
   if (props.profile.installPath) {
-    loadCampaignData(id, props.profile.id, props.profile.installPath)
+    loadCampaignData(id, props.profile.id, currentPlaygroundPath.value || props.profile.installPath)
   }
 })
 
@@ -609,7 +654,7 @@ const dragOverIndex = ref<number>(-1)
 const selectedModSet = computed(() => modSets.value.find((m) => m.id === selectedModSetId.value) ?? null)
 
 // 当前播放集中已有的 MOD ID
-const editingModIds = computed(() => new Set(editingModSet.value?.mods.map((m) => m.id) ?? []))
+const editingModIds = computed(() => new Set(editingModSet.value?.packages.map((m) => m.id) ?? []))
 
 // 右侧可用 MOD（排除已添加的）
 const availableMods = computed(() => downloadedMods.value.filter((m) => !editingModIds.value.has(m.id)))
@@ -618,6 +663,21 @@ function selectModSet(id: string): void {
   selectedModSetId.value = id
   showDropdown.value = false
   localStorage.setItem(modSetStorageKey.value, id)
+  // 启用播放集：重建 playground（删旧+按新播放集硬链接覆盖），地图/战役数据源随之更新
+  void rebuildPlayground(id)
+}
+
+/** 用指定播放集重建 playground 并记录路径（全局设置从 settings/ 硬链接，见 playground-manager） */
+async function rebuildPlayground(modSetId: string): Promise<void> {
+  try {
+    const res = await window.api.playground.apply(props.profile.id, modSetId)
+    if (res.ok && res.playgroundPath) {
+      currentPlaygroundPath.value = res.playgroundPath
+      console.log('[GameView] playground 已重建:', res.playgroundPath, 'modSet:', modSetId)
+    }
+  } catch (e) {
+    console.error('[GameView] playground 重建失败:', e)
+  }
 }
 
 async function launch(): Promise<void> {
@@ -675,6 +735,7 @@ async function launch(): Promise<void> {
           playerCount: 2,
           aiPlayers: 1,
           extraSettings,
+          mpMapsPath: applyResult.mapsPath,
           seed: Math.floor(Math.random() * 99999999)
         }
       })
@@ -693,7 +754,7 @@ async function launch(): Promise<void> {
 
 function startEdit(mod: ModSet): void {
   editingModSetId.value = mod.id
-  editingModSet.value = { ...mod, mods: [...mod.mods] }
+  editingModSet.value = { ...mod, packages: [...mod.packages] }
 }
 
 function saveEdit(): void {
@@ -750,23 +811,37 @@ function createModSet(): void {
     id: `mod-${Date.now()}`,
     name: newModSet.value.name,
     description: newModSet.value.description,
-    mods: []
+    packages: []
   })
   newModSet.value = { name: '', description: '' }
   showCreateForm.value = false
   saveModSetsToDisk()
 }
 
+// 复制播放集：深拷贝内容 + 新 id/名称（副本），直接落盘
+function copyModSet(mod: ModSet): void {
+  const base = mod.name.replace(/\s*（副本）\s*$/, '')
+  const copy: ModSet = {
+    ...mod,
+    id: `mod-${Date.now()}`,
+    name: `${base}（副本）`,
+    packages: mod.packages.map((p) => ({ ...p }))
+  }
+  modSets.value.push(copy)
+  toastSuccess(`已复制播放集「${mod.name}」`)
+  saveModSetsToDisk()
+}
+
 // 拖拽：从右侧添加 MOD
 function addMod(mod: ModItem): void {
   if (!editingModSet.value) return
-  editingModSet.value.mods.push({ ...mod })
+  editingModSet.value.packages.push({ ...mod })
 }
 
 // 拖拽：从左侧移除 MOD
 function removeMod(index: number): void {
   if (!editingModSet.value) return
-  editingModSet.value.mods.splice(index, 1)
+  editingModSet.value.packages.splice(index, 1)
 }
 
 // 拖拽开始
@@ -793,13 +868,13 @@ function onDrop(target: 'left' | 'right', targetIndex: number): void {
   if (dragSource.value === 'right' && target === 'left') {
     // 从右侧添加到左侧
     const mod = availableMods.value[dragIndex.value]
-    if (mod) editingModSet.value.mods.splice(targetIndex, 0, { ...mod })
+    if (mod) editingModSet.value.packages.splice(targetIndex, 0, { ...mod })
   } else if (dragSource.value === 'left' && target === 'right') {
     // 从左侧移除
-    editingModSet.value.mods.splice(dragIndex.value, 1)
+    editingModSet.value.packages.splice(dragIndex.value, 1)
   } else if (dragSource.value === 'left' && target === 'left') {
     // 左侧内部排序
-    const mods = editingModSet.value.mods
+    const mods = editingModSet.value.packages
     const item = mods.splice(dragIndex.value, 1)[0]
     if (item) mods.splice(targetIndex, 0, item)
   }
@@ -949,11 +1024,11 @@ async function saveGraphicsSettings(): Promise<void> {
       // 写入窗口模式
       const windowed = moWindowMode.value === 'windowed' || moWindowMode.value === 'borderless'
       const borderless = moWindowMode.value === 'borderless'
-      await window.api.rendererManager.writeWindowed(installPath, resourcesPath, moRendererKey.value, windowed, borderless)
+      await window.api.rendererManager.writeWindowed(installPath, resourcesPath, moRendererKey.value, windowed, borderless, props.profile.id)
 
       // 写入分辨率
       const [w, h] = moResolution.value.split('×').map(Number)
-      await window.api.rendererManager.writeResolution(installPath, resourcesPath, moRendererKey.value, w, h)
+      await window.api.rendererManager.writeResolution(installPath, resourcesPath, moRendererKey.value, w, h, props.profile.id)
 
       // 持久化渲染器选择
       await window.api.fs.setConfig(`mo_renderer_${props.profile.id}`, moRendererKey.value)
@@ -980,11 +1055,41 @@ async function saveGraphicsSettings(): Promise<void> {
 watch(activeTab, (tab) => {
   if (tab === 'settings') {
     loadGraphicsSettings()
+    loadSoundSettings()
   }
   if (tab === 'keyboard') {
     loadKeyboardBindings()
   }
 })
+
+// ==================== 音量设置 ====================
+// 全局音量：读/写 settings/RA2MO.ini [Sound]，playground 构建时硬链接进游戏目录
+const soundValues = ref<Record<string, number>>({})
+const soundLoading = ref(false)
+const soundSliders = [
+  { key: 'Volume', label: '音效' },
+  { key: 'ScoreVolume', label: '音乐' },
+  { key: 'SpeechVolume', label: '语音' },
+  { key: 'VoiceVolume', label: '单位语音' }
+]
+
+async function loadSoundSettings(): Promise<void> {
+  soundLoading.value = true
+  try {
+    soundValues.value = await window.api.sound.read(props.profile.id)
+  } finally {
+    soundLoading.value = false
+  }
+}
+
+async function saveSoundSettings(): Promise<void> {
+  const result = await window.api.sound.write(props.profile.id, soundValues.value)
+  if (result.ok) {
+    toastSuccess('音量设置已保存')
+  } else {
+    toastError(result.error ?? '保存失败')
+  }
+}
 
 // ==================== 快捷键设置 ====================
 
@@ -1026,7 +1131,7 @@ async function saveKeyboardBindings(): Promise<void> {
       currentKey: b.currentKey,
       defaultKey: b.defaultKey
     }))
-    await window.api.keyboard.save(props.profile.installPath, snapshot)
+    await window.api.keyboard.save(props.profile.installPath, snapshot, props.profile.id)
     toastSuccess('快捷键设置已保存')
   } finally {
     keyboardSaving.value = false
@@ -1039,7 +1144,7 @@ async function resetKeyboardBindings(): Promise<void> {
   for (const b of keyboardBindings.value) {
     b.currentKey = b.defaultKey
   }
-  await window.api.keyboard.save(props.profile.installPath, keyboardBindings.value)
+  await window.api.keyboard.save(props.profile.installPath, keyboardBindings.value, props.profile.id)
   toastSuccess('已恢复默认快捷键')
 }
 
@@ -1316,13 +1421,35 @@ interface MapItem {
 const maps = ref<MapItem[]>([])
 
 async function loadMaps(): Promise<void> {
-  const result = await window.api.fs.listMaps(props.profile.id)
+  const result = await window.api.maps.listLibrary(props.profile.id)
   if (result.ok) {
-    maps.value = result.files.map(f => ({
-      id: f.path,
-      name: f.name,
-      size: f.size
+    maps.value = result.maps.map(m => ({
+      id: m.id,
+      name: m.name,
+      size: m.size
     }))
+  }
+}
+
+// 导入地图（文件夹包 / .map / 压缩包）
+async function importMap(): Promise<void> {
+  const result = await window.api.maps.import(props.profile.id)
+  if (result.ok && result.imported?.length) {
+    toastSuccess(`已导入 ${result.imported.length} 个地图`)
+    await loadMaps()
+  } else if (result.error && result.error !== '已取消') {
+    toastError(result.error)
+  }
+}
+
+// 删除地图包
+async function deleteMap(name: string): Promise<void> {
+  if (!confirm(`删除地图「${name}」？`)) return
+  const result = await window.api.maps.delete(props.profile.id, name)
+  if (result.ok) {
+    await loadMaps()
+  } else {
+    toastError(result.error ?? '删除失败')
   }
 }
 
@@ -1333,7 +1460,7 @@ function formatSize(bytes: number): string {
 }
 
 async function openMapsDir(): Promise<void> {
-  await window.api.fs.openMapsDir()
+  await window.api.fs.openMapsDir(props.profile.id)
 }
 
 // 回放管理
@@ -1357,7 +1484,7 @@ async function loadReplays(): Promise<void> {
 }
 
 async function openReplaysDir(): Promise<void> {
-  await window.api.fs.openReplaysDir()
+  await window.api.fs.openReplaysDir(props.profile.id)
 }
 
 /**
@@ -1454,15 +1581,15 @@ async function run(key: string): Promise<void> {
         <div class="flex flex-1 flex-col border-r border-line overflow-y-auto px-6 py-4">
           <p class="mb-2 text-[12px] text-fg-dim">当前播放集内容</p>
           <div
-            v-for="(mod, i) in selectedModSet?.mods ?? []"
+            v-for="(mod, i) in selectedModSet?.packages ?? []"
             :key="mod.id"
             class="flex items-center gap-2 border border-line bg-panel px-3 py-2 text-[13px] not-last:mb-1"
           >
             <span class="text-fg-dim">{{ i + 1 }}.</span>
             <span>{{ mod.name }}</span>
           </div>
-          <p v-if="!selectedModSet?.mods.length" class="text-[13px] text-fg-dim">
-            此播放集无 MOD
+          <p v-if="!selectedModSet?.packages.length" class="text-[13px] text-fg-dim">
+            此播放集无包
           </p>
         </div>
 
@@ -1471,8 +1598,8 @@ async function run(key: string): Promise<void> {
           <div class="text-center">
             <p class="mb-6 text-[13px] text-fg-dim">
               当前播放集：{{ selectedModSet?.name ?? '未选择' }}
-              <span v-if="selectedModSet?.mods.length" class="text-fg-dim">
-                （{{ selectedModSet.mods.length }} 个 MOD）
+              <span v-if="selectedModSet?.packages.length" class="text-fg-dim">
+                （{{ selectedModSet.packages.length }} 个包）
               </span>
             </p>
             <button
@@ -1547,8 +1674,8 @@ async function run(key: string): Promise<void> {
             <div>
               <h3 class="font-medium text-fg">{{ mod.name }}</h3>
               <p class="mt-0.5 text-[12px] text-fg-dim">{{ mod.description }}</p>
-              <p v-if="mod.mods.length" class="mt-1 text-[12px] text-fg-dim">
-                包含 {{ mod.mods.length }} 个 MOD
+              <p v-if="mod.packages.length" class="mt-1 text-[12px] text-fg-dim">
+                包含 {{ mod.packages.length }} 个包
               </p>
             </div>
             <span
@@ -1560,10 +1687,23 @@ async function run(key: string): Promise<void> {
           </div>
           <div class="flex gap-2">
             <button
+              v-if="selectedModSetId !== mod.id"
+              class="bg-accent px-3 py-1 text-[12px] text-white hover:bg-accent-hi"
+              @click="selectModSet(mod.id)"
+            >
+              启用
+            </button>
+            <button
               class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-fg"
               @click="startEdit(mod)"
             >
               修改
+            </button>
+            <button
+              class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-fg"
+              @click="copyModSet(mod)"
+            >
+              复制
             </button>
             <button
               v-if="mod.id !== 'vanilla'"
@@ -1599,6 +1739,24 @@ async function run(key: string): Promise<void> {
           </button>
         </div>
 
+        <!-- 名称/描述编辑 -->
+        <div class="flex gap-4 border-b border-line px-6 py-3">
+          <label class="flex items-center gap-2 text-[12px] text-fg-dim">
+            名称
+            <input
+              v-model="editingModSet.name"
+              class="w-48 border border-line bg-bg px-2 py-1 text-[13px] text-fg outline-none focus:border-accent"
+            />
+          </label>
+          <label class="flex flex-1 items-center gap-2 text-[12px] text-fg-dim">
+            描述
+            <input
+              v-model="editingModSet.description"
+              class="flex-1 border border-line bg-bg px-2 py-1 text-[13px] text-fg outline-none focus:border-accent"
+            />
+          </label>
+        </div>
+
         <!-- 两栏布局 -->
         <div class="flex flex-1 overflow-hidden">
           <!-- 左侧：播放集中的 MOD（可拖拽排序） -->
@@ -1608,14 +1766,14 @@ async function run(key: string): Promise<void> {
             </div>
             <div
               class="flex-1 overflow-y-auto p-4"
-              :class="dragOverTarget === 'left' && dragOverIndex === (editingModSet?.mods.length ?? 0) ? 'bg-accent/10' : ''"
+              :class="dragOverTarget === 'left' && dragOverIndex === (editingModSet?.packages.length ?? 0) ? 'bg-accent/10' : ''"
               @dragover.prevent
-              @dragenter.prevent="onDragOver('left', editingModSet?.mods.length ?? 0)"
+              @dragenter.prevent="onDragOver('left', editingModSet?.packages.length ?? 0)"
               @dragleave="onDragLeave()"
-              @drop="onDrop('left', editingModSet?.mods.length ?? 0)"
+              @drop="onDrop('left', editingModSet?.packages.length ?? 0)"
             >
               <div
-                v-for="(mod, i) in editingModSet?.mods"
+                v-for="(mod, i) in editingModSet?.packages"
                 :key="mod.id"
                 class="mb-2 flex cursor-grab items-center gap-3 border bg-panel px-3 py-2 text-[13px] active:cursor-grabbing transition-colors"
                 :class="{
@@ -1641,18 +1799,18 @@ async function run(key: string): Promise<void> {
                 </span>
               </div>
               <p
-                v-if="!editingModSet?.mods.length"
+                v-if="!editingModSet?.packages.length"
                 class="text-center text-[13px] text-fg-dim"
               >
-                拖拽右侧 MOD 到此处添加
+                拖拽右侧包到此处添加
               </p>
             </div>
           </div>
 
-          <!-- 右侧：已下载的 MOD 列表 -->
+          <!-- 右侧：已安装的包列表 -->
           <div class="flex flex-1 flex-col">
             <div class="border-b border-line px-4 py-2 text-[12px] text-fg-dim">
-              已下载的 MOD（拖到左侧添加）
+              已安装的包（拖到左侧添加）
             </div>
             <div
               class="flex-1 overflow-y-auto p-4"
@@ -1684,7 +1842,7 @@ async function run(key: string): Promise<void> {
                 v-if="!availableMods.length"
                 class="text-center text-[13px] text-fg-dim"
               >
-                所有 MOD 已添加
+                所有包已添加
               </p>
             </div>
           </div>
@@ -1694,11 +1852,59 @@ async function run(key: string): Promise<void> {
 
     <!-- MOD 管理 -->
     <div v-else-if="activeTab === 'mods'" class="flex flex-1 overflow-hidden">
-      <!-- 心灵终结：制作中 -->
-      <div v-if="isMentalOmega" class="flex flex-1 items-center justify-center">
-        <div class="text-center">
-          <p class="text-[15px] text-fg">MOD 管理</p>
-          <p class="mt-2 text-[13px] text-fg-dim">心灵终结 MOD 管理功能制作中...</p>
+      <!-- 心灵终结：本地包管理（导入/删除，按播放集顺序覆盖） -->
+      <div v-if="isMentalOmega" class="flex flex-1 flex-col px-6 py-5">
+        <div class="mb-4 flex items-center justify-between">
+          <h2 class="text-[15px] font-medium text-fg">包管理</h2>
+          <div class="flex gap-2">
+            <button
+              class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
+              @click="loadInstalledMods"
+            >
+              刷新
+            </button>
+            <button
+              class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
+              @click="importFolder"
+            >
+              导入文件夹
+            </button>
+            <button
+              class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi"
+              @click="importArchive"
+            >
+              导入压缩包
+            </button>
+          </div>
+        </div>
+        <p class="mb-3 text-[12px] text-fg-dim">
+          支持文件夹或 zip/7z/rar 压缩包，也可直接拖入。包按播放集顺序覆盖到游戏工作区，后覆盖胜出。
+        </p>
+        <div
+          class="flex-1 overflow-y-auto rounded border border-dashed p-3 transition-colors"
+          :class="dropActive ? 'border-accent bg-accent/5' : 'border-line'"
+          @dragover.prevent="dropActive = true"
+          @dragleave.prevent="dropActive = false"
+          @drop="onDropImport"
+        >
+          <div
+            v-for="pkg in installedMods"
+            :key="pkg.name"
+            class="mb-2 flex items-center justify-between rounded border border-line bg-panel px-4 py-3"
+          >
+            <div>
+              <h3 class="text-[13px] font-medium text-fg">{{ pkg.name }}</h3>
+            </div>
+            <button
+              class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-red-400"
+              @click="deletePackage(pkg.name)"
+            >
+              删除
+            </button>
+          </div>
+          <p v-if="!installedMods.length" class="mt-8 text-center text-[13px] text-fg-dim">
+            暂无包，点击导入或直接拖入文件夹/压缩包
+          </p>
         </div>
       </div>
 
@@ -2017,13 +2223,22 @@ async function run(key: string): Promise<void> {
             刷新
           </button>
           <button
-            class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi"
+            class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
             @click="openMapsDir"
           >
             打开目录
           </button>
+          <button
+            class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi"
+            @click="importMap"
+          >
+            导入地图
+          </button>
         </div>
       </div>
+      <p class="mb-3 text-[12px] text-fg-dim">
+        下载/导入的地图存为文件夹包（maps/图名/），游戏通过 MPMapsPath 直接读取；可选配置（模式/预设）格式待定。
+      </p>
 
       <div class="flex-1 overflow-y-auto">
         <div
@@ -2035,10 +2250,16 @@ async function run(key: string): Promise<void> {
             <h3 class="text-[13px] font-medium text-fg">{{ map.name }}</h3>
             <p class="mt-0.5 text-[12px] text-fg-dim">{{ formatSize(map.size) }}</p>
           </div>
+          <button
+            class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-red-400"
+            @click="deleteMap(map.name)"
+          >
+            删除
+          </button>
         </div>
 
         <p v-if="!maps.length" class="mt-8 text-center text-[13px] text-fg-dim">
-          暂无地图，点击"打开目录"将地图文件放入 maps 文件夹
+          暂无地图，点击"导入地图"选择地图文件夹/.map/压缩包
         </p>
       </div>
     </div>
@@ -2091,7 +2312,15 @@ async function run(key: string): Promise<void> {
 
     <!-- 多人游戏（仅 MO；ZH 联机独立逻辑暂未实现，不挂载 LobbyView 以免自动连上 MO 的 CnCNet 频道） -->
     <div v-else-if="activeTab === 'multiplayer'" class="flex flex-1 flex-col overflow-hidden w-full min-h-0">
-      <LobbyView v-if="isMentalOmega" :game-id="profile.id" :current-mod-set-id="selectedModSetId" :game-path="profile.generalsPath ?? profile.installPath" @back="activeTab = 'modsets'" />
+      <LobbyView
+        v-if="isMentalOmega"
+        :game-id="profile.id"
+        :current-mod-set-id="selectedModSetId"
+        :mod-sets="modSets"
+        :game-path="profile.generalsPath ?? profile.installPath"
+        @update:current-mod-set-id="selectModSet"
+        @back="activeTab = 'modsets'"
+      />
       <div v-else class="flex flex-1 items-center justify-center">
         <p class="text-[14px] text-fg-dim">绝命时刻联机暂未支持（ZH 走独立联机逻辑，不复用 MO 的 CnCNet 路径）</p>
       </div>
@@ -2447,6 +2676,34 @@ async function run(key: string): Promise<void> {
         </div>
             </template>
           </template>
+
+          <!-- 音量设置（全局，写 settings/RA2MO.ini [Sound]，硬链接进 playground） -->
+          <div class="mt-8 max-w-[520px]">
+            <div class="mb-3 flex items-center justify-between">
+              <h3 class="text-[15px] font-medium text-fg">音量设置</h3>
+              <button
+                class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi disabled:opacity-50"
+                :disabled="soundLoading"
+                @click="saveSoundSettings"
+              >
+                保存
+              </button>
+            </div>
+            <div v-for="s in soundSliders" :key="s.key" class="mb-3">
+              <div class="mb-1 flex items-center justify-between">
+                <label class="text-[12px] text-fg-dim">{{ s.label }}</label>
+                <span class="text-[12px] text-fg">{{ soundValues[s.key] ?? 0 }}</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                v-model.number="soundValues[s.key]"
+                class="w-full accent-accent"
+              />
+            </div>
+            <p v-if="soundLoading" class="text-[12px] text-fg-dim">加载中...</p>
+          </div>
 
           <p v-if="status && activeTab === 'settings'" class="mt-3 text-[13px] text-fg-dim">{{ status }}</p>
         </div>

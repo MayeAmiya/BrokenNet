@@ -8,8 +8,35 @@ import RoomDetail from '@renderer/components/lobby/RoomDetail.vue'
 import CreateRoomModal from '@renderer/components/lobby/CreateRoomModal.vue'
 import PasswordModal from '@renderer/components/lobby/PasswordModal.vue'
 
-const props = defineProps<{ gameId: string; currentModSetId?: string; gamePath?: string }>()
-const emit = defineEmits<{ back: [] }>()
+const props = defineProps<{
+  gameId: string
+  currentModSetId?: string
+  gamePath?: string
+  modSets?: Array<{ id: string; name: string; packages?: Array<{ id: string; name: string }> }>
+}>()
+const emit = defineEmits<{ back: []; 'update:current-mod-set-id': [id: string] }>()
+
+// 大厅里切换播放集要同步到 useLobby 的 currentModSetId（clientLaunch/hostLaunch 用它建 playground）
+import { currentModSetId as lobbyCurrentModSetId, currentPlaygroundPath } from '@renderer/composables/lobby-state'
+watch(() => props.currentModSetId, (id) => {
+  if (id) lobbyCurrentModSetId.value = id
+})
+const modSetDropdownOpen = ref(false)
+function selectLobbyModSet(id: string): void {
+  modSetDropdownOpen.value = false
+  emit('update:current-mod-set-id', id)
+}
+// 播放集切换后 playground 重建完成（currentPlaygroundPath 变化）→ 重读地图/模式/选项数据
+watch(currentPlaygroundPath, () => {
+  if (!props.gamePath && !currentPlaygroundPath.value) return
+  void loadRealData(currentPlaygroundPath.value || props.gamePath || '', props.gameId)
+})
+// 点击下拉外部关闭
+function onWindowClick(e: MouseEvent): void {
+  if (modSetDropdownOpen.value && !(e.target as HTMLElement)?.closest?.('.modset-dropdown')) {
+    modSetDropdownOpen.value = false
+  }
+}
 
 const {
   rooms, currentRoom, roomMessages, friends, isLoading,
@@ -161,9 +188,9 @@ async function onRoomHover(room: Room): Promise<void> {
   if (hoverClearTimer) clearTimeout(hoverClearTimer)
   hoverRoom.value = room
   const latest = rooms.value.find((r) => r.id === room.id) ?? room
-  if (!props.gamePath) { showExternalPreview(); return }
+  if (!props.gamePath && !currentPlaygroundPath.value) { showExternalPreview(); return }
   try {
-    const data = await window.api.mapPreview.load(props.gamePath, getMapFilePath(latest.map), latest.mapHash)
+    const data = await window.api.mapPreview.load(currentPlaygroundPath.value || props.gamePath || '', getMapFilePath(latest.map), latest.mapHash)
     hoverPreview.value = data
   } catch {
     hoverPreview.value = null
@@ -224,9 +251,8 @@ watch(() => props.gameId, (newId, oldId) => {
 })
 
 onMounted(async () => {
+  window.addEventListener('click', onWindowClick)
   connectCncnet(props.gamePath, props.gameId, props.currentModSetId)
-  // 切回 tab 时若仍在房间内（cleanup 保留 currentRoom），直接回到房间视图
-  if (currentRoom.value) currentView.value = 'room'
   // 切回 tab 时房间数据已在（cleanup 保留 rooms，监听持续），不重复刷新；
   // 仅当房间为空（首次进入）才加载
   if (rooms.value.length === 0) {
@@ -234,7 +260,7 @@ onMounted(async () => {
   }
   try { await fetchFriends() } catch (e) { console.error('fetchFriends failed:', e) }
   if (props.gamePath) {
-    await loadRealData(props.gamePath)
+    await loadRealData(props.gamePath, props.gameId)
     // 加载真实阵营/颜色
     if ((window as any).api?.mpLobbyOptions?.load) {
       try {
@@ -245,10 +271,14 @@ onMounted(async () => {
       } catch (e) { console.error('mpLobbyOptions load failed:', e) }
     }
   }
+  // 数据就绪后再进房间视图：否则 RoomDetail 挂载时 realMapFilePaths 还是空，
+  // getMapFilePath 返回显示名而非真实路径，地图预览加载失败（切 tab 回来预览消失）
+  if (currentRoom.value) currentView.value = 'room'
 })
 
 onUnmounted(() => {
   stopPanelResize()
+  window.removeEventListener('click', onWindowClick)
   cleanup()
   // 离开大厅视图时隐藏外部预览窗（可能在悬停中）
   window.api.mapPreview.hide()
@@ -306,7 +336,34 @@ function onBack(): void {
         </template>
         <span v-else class="text-[13px] font-medium text-fg">多人游戏大厅</span>
       </div>
-      <!-- 顶栏：简单连接状态 + 在线数（详细状态在聊天区横幅） -->
+      <!-- 顶栏右侧：播放集切换（加入房间前可切）+ 连接状态 -->
+      <div class="flex items-center gap-3">
+      <div class="modset-dropdown relative">
+        <button
+          class="flex items-center gap-1.5 rounded border border-line bg-panel px-2.5 py-1 text-[12px] text-fg hover:border-accent"
+          @click="modSetDropdownOpen = !modSetDropdownOpen"
+        >
+          <span>播放集：{{ modSets?.find(m => m.id === currentModSetId)?.name ?? currentModSetId ?? '未选择' }}</span>
+          <span class="text-fg-dim">{{ modSetDropdownOpen ? '▲' : '▼' }}</span>
+        </button>
+        <div
+          v-if="modSetDropdownOpen"
+          class="absolute left-0 z-30 mt-1 max-h-64 w-56 overflow-y-auto border border-line bg-panel shadow-lg"
+        >
+          <div
+            v-for="ms in modSets"
+            :key="ms.id"
+            class="flex cursor-pointer items-center justify-between px-3 py-2 text-[12px] hover:bg-panel-alt"
+            :class="currentModSetId === ms.id ? 'bg-panel-alt' : ''"
+            @click="selectLobbyModSet(ms.id)"
+          >
+            <span>{{ ms.name }}</span>
+            <span v-if="ms.packages?.length" class="text-fg-dim">{{ ms.packages.length }} 包</span>
+          </div>
+          <p v-if="!modSets?.length" class="px-3 py-2 text-[12px] text-fg-dim">暂无播放集</p>
+        </div>
+      </div>
+      <!-- 顶栏：连接状态 + 在线数（详细状态在聊天区横幅） -->
       <span class="flex items-center gap-1.5 text-[11px]" :class="connStatusColor">
         <span
           class="inline-block h-2 w-2 rounded-full"
@@ -320,11 +377,12 @@ function onBack(): void {
         {{ connStatusLabel }}
         <span v-if="connState === 2" class="text-fg-dim">CnCNet 在线: {{ playerCount ?? 'N/A' }}</span>
       </span>
+      </div>
     </div>
 
     <!-- 主内容区 -->
     <div v-if="inRoom && currentRoom" class="flex min-h-0 flex-1">
-      <RoomDetail :room="currentRoom" :players="currentRoom.players" :my-mod-set-id="currentModSetId" :maps="getMaps()" :get-maps-for-mode="getMapsForMode" :game-modes="getGameModes()" :sides="realSides" :mp-colors="realMpColors" :room-messages="roomMessages" :game-path="gamePath" :get-map-file-path="getMapFilePath" :ini-dropdowns="realDropdowns" :ini-checkboxes="realCheckboxes" :dropdown-values="dropdownValues" :checkbox-values="checkboxValues" :ban-info="myBanInfo" :ban-enabled="allLauncher" :covered-factions="coveredFactionsForSide" :random-selector-count="realRandomSelectorCount" :get-random-map-for-count="getRandomMapForCount" :selected-tunnel="selectedTunnel" :auto-ready="autoReady" :disallowed-sides="getDisallowedSides()" :disallowed-colors="getDisallowedColors()" @leave="onLeaveRoom" @ready="toggleReady" @update-attr="updatePlayerAttr" @update-map="updateMap" @update-game-mode="updateGameMode" @update-option="updateOption" @ban-update="setMyBannedFactions" @map-request="requestMap" @map-switch="updateMap" @select-tunnel="selectTunnel" @update:auto-ready="setAutoReady" @lock="toggleLock" @send-message="sendMessage" @add-ai="addAiPlayer" @kick="kickPlayer" @ban="banPlayer" @launch="hostLaunch(gamePath ?? '', props.gameId, currentModSetId ?? 'vanilla')" />
+      <RoomDetail :room="currentRoom" :players="currentRoom.players" :my-mod-set-id="currentModSetId" :maps="getMaps()" :get-maps-for-mode="getMapsForMode" :game-modes="getGameModes()" :sides="realSides" :mp-colors="realMpColors" :room-messages="roomMessages" :game-path="currentPlaygroundPath || gamePath" :get-map-file-path="getMapFilePath" :ini-dropdowns="realDropdowns" :ini-checkboxes="realCheckboxes" :dropdown-values="dropdownValues" :checkbox-values="checkboxValues" :ban-info="myBanInfo" :ban-enabled="allLauncher" :covered-factions="coveredFactionsForSide" :random-selector-count="realRandomSelectorCount" :get-random-map-for-count="getRandomMapForCount" :selected-tunnel="selectedTunnel" :auto-ready="autoReady" :disallowed-sides="getDisallowedSides()" :disallowed-colors="getDisallowedColors()" @leave="onLeaveRoom" @ready="toggleReady" @update-attr="updatePlayerAttr" @update-map="updateMap" @update-game-mode="updateGameMode" @update-option="updateOption" @ban-update="setMyBannedFactions" @map-request="requestMap" @map-switch="updateMap" @select-tunnel="selectTunnel" @update:auto-ready="setAutoReady" @lock="toggleLock" @send-message="sendMessage" @add-ai="addAiPlayer" @kick="kickPlayer" @ban="banPlayer" @launch="hostLaunch(gamePath ?? '', props.gameId, currentModSetId ?? 'vanilla')" />
     </div>
     <div v-else class="flex min-h-0 flex-1">
       <div ref="leftPanelRef" class="flex min-h-0 shrink-0 flex-col" :style="chatCollapsed ? { width: '100%' } : { width: leftWidth + 'px' }">

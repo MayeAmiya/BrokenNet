@@ -6,7 +6,7 @@ import { loadMaps } from './gamemode-reader'
 
 const MAP_CELL_SIZE_X = 48
 const MAP_CELL_SIZE_Y = 24
-const MAP_EXTENSIONS = ['.map', '.yrm', '.mmx', '.umx']
+export const MAP_EXTENSIONS = ['.map', '.yrm', '.mmx', '.umx']
 
 export interface MapPreviewData {
   previewPath: string | null
@@ -51,7 +51,7 @@ interface MapRect { x: number; y: number; w: number; h: number }
  * 读取地图尺寸。MO 等距图用 LocalSize（本地可视区）和 Size（全图）。
  * 返回原始格数供等距转换使用（对齐 xna Map.cs 的 actualSizeValues/localSizeValues）。
  */
-function readMapSizeInfo(mapIni: CCIniFile): { actualSize: MapRect; localSize: MapRect; width: number; height: number } {
+export function readMapSizeInfo(mapIni: CCIniFile): { actualSize: MapRect; localSize: MapRect; width: number; height: number } {
   const sec = mapIni.getSection('Map')
   const parse = (v?: string): MapRect | null => {
     if (!v) return null
@@ -90,7 +90,7 @@ function readPngSize(filePath: string): { width: number; height: number } | null
  * RA2 地图原生格式用裸数字键（0=…、1=…，前 8 个是出生点，20+ 是触发/目标点）；
  * 也兼容 CnCNet 自定义的 WaypointN=… 写法。
  */
-function readWaypoints(mapIni: CCIniFile): string[] {
+export function readWaypoints(mapIni: CCIniFile): string[] {
   const sec = mapIni.getSection('Waypoints')
   if (!sec) return []
 
@@ -319,6 +319,15 @@ export function loadMapPreviewData(gamePath: string, mapFilePath: string): MapPr
  * Supports both plain names (searches common dirs) and relative paths (e.g. MapsMO\Standard\foo).
  */
 export function findMapFileByName(gamePath: string, mapName: string): string | null {
+  // 绝对路径（如地图库 maps/<图名>/<图名>.map）：直接按存在性解析
+  if (path.isAbsolute(mapName)) {
+    if (fs.existsSync(mapName)) return mapName
+    for (const ext of MAP_EXTENSIONS) {
+      const candidate = `${mapName}${ext}`
+      if (fs.existsSync(candidate)) return candidate
+    }
+    return null
+  }
   // If the name already contains path separators, treat as relative path
   if (mapName.includes('/') || mapName.includes('\\')) {
     for (const ext of MAP_EXTENSIONS) {

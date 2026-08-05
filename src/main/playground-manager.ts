@@ -25,6 +25,8 @@ export interface PlaygroundApplyOptions {
 export interface PlaygroundApplyResult {
   ok: boolean
   playgroundPath?: string
+  /** 独立地图库目录（写 spawn.ini [Settings] MPMapsPath，游戏从这里读下载/导入的地图） */
+  mapsPath?: string
   error?: string
 }
 
@@ -66,6 +68,24 @@ const CONFIG_EXTS = new Set(['.ini', '.cfg', '.txt', '.json', '.log', '.dmp', '.
 function isConfigFile(name: string): boolean {
   const ext = path.extname(name).toLowerCase()
   return CONFIG_EXTS.has(ext)
+}
+
+/**
+ * 全局设置文件（相对游戏根路径，正斜杠）——画质/快捷键/音量，**不按播放集**。
+ * 存 resourceDir/<gameId>/settings/，playground 构建时硬链接进去（包覆盖后再链接，启动器设置优先）。
+ * 游戏运行时的修改通过硬链接写回 settings/，重建 playground 不丢。
+ */
+const GLOBAL_SETTINGS_REL = new Set([
+  'ddraw.ini', // 画质：分辨率/窗口模式/渲染器（游戏根目录）
+  'Resources/Renderers.ini', // 画质：渲染器列表
+  'KeyboardCommands.ini', // 快捷键（默认绑定）
+  'KeyboardMD.ini', // 快捷键（用户覆盖项）
+  'KEYBOARD.INI', // 快捷键（备用名）
+  'RA2MO.ini' // 音量/游戏设置（settingsFile）
+])
+
+function normalizeRel(rel: string): string {
+  return rel.replace(/\\/g, '/')
 }
 
 /** 链接失败统计（透传给用户，避免「文件缺失还返回成功」） */
@@ -286,7 +306,9 @@ function linkOriginal(
           linkOriginal(srcPath, dstPath, saveRoot, stats, onFile)
         }
       } else if (entry.isFile()) {
-        if (isConfigFile(entry.name)) {
+        // 全局设置文件（画质/快捷键/音量）不走 per-modset：基链接直接硬链接安装源，
+        // 之后由 linkGlobalSettings 用 settings/ 覆盖（启动器设置优先）
+        if (isConfigFile(entry.name) && !GLOBAL_SETTINGS_REL.has(normalizeRel(rel))) {
           linkConfigFile(srcPath, dstPath, path.join(saveRoot, 'config', rel), stats)
         } else {
           hardlinkOrSkip(srcPath, dstPath, stats)
@@ -306,6 +328,39 @@ function linkOriginal(
       stats.failed++
       if (stats.errors.length < 5) stats.errors.push(`${rel}: ${(e as Error).message}`)
     }
+  }
+}
+
+/**
+ * 全局设置（画质/快捷键/音量）→ 从 resourceDir/<gameId>/settings/ 硬链接进 playground。
+ * 在包覆盖之后执行，启动器设置的设置文件优先于包自带。文件不存在时从安装目录播种（无则建空文件），
+ * 保证游戏运行时的写入通过硬链接落回 settings/，重建不丢。
+ */
+function linkGlobalSettings(
+  resourceDir: string,
+  gameId: string,
+  installPath: string,
+  playground: string,
+  stats: LinkStats
+): void {
+  const settingsRoot = path.join(resourceDir, gameId, 'settings')
+  for (const rel of GLOBAL_SETTINGS_REL) {
+    const globalSrc = path.join(settingsRoot, rel)
+    if (!fs.existsSync(globalSrc)) {
+      fs.mkdirSync(path.dirname(globalSrc), { recursive: true })
+      const installSrc = path.join(installPath, rel)
+      try {
+        if (fs.existsSync(installSrc)) {
+          fs.copyFileSync(installSrc, globalSrc)
+        } else {
+          fs.writeFileSync(globalSrc, '', 'utf-8')
+        }
+      } catch (e) {
+        console.error(`[playground] 播种全局设置失败 ${rel}: ${(e as Error).message}`)
+        continue
+      }
+    }
+    hardlinkOrSkip(globalSrc, path.join(playground, rel), stats)
   }
 }
 
@@ -332,16 +387,18 @@ function linkMod(modDir: string, playground: string, stats: LinkStats): void {
   walk(modDir, playground)
 }
 
-/** 从 modsets.json 读当前播放集的 MOD 名列表 */
-async function getModSetModNames(resourceDir: string, gameId: string, modSetId: string): Promise<string[]> {
+/** 从 modsets.json 读当前播放集的包名列表（兼容旧 mods 字段） */
+async function getPlaySetPackageNames(resourceDir: string, gameId: string, modSetId: string): Promise<string[]> {
   try {
     const modSetsPath = path.join(resourceDir, gameId, 'modsets.json')
     const data = JSON.parse(await readFile(modSetsPath, 'utf-8')) as Array<{
       id: string
-      mods: Array<{ id: string; name: string }>
+      mods?: Array<{ id: string; name: string }>
+      packages?: Array<{ id: string; name: string }>
     }>
     const set = data.find((m) => m.id === modSetId)
-    return set?.mods?.map((m) => m.name) ?? []
+    const refs = set?.packages ?? set?.mods
+    return refs?.map((m) => m.name) ?? []
   } catch {
     return []
   }
@@ -388,19 +445,22 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
       }
     })
 
-    // 3. MOD 覆盖
-    const modNames = await getModSetModNames(resourceDir, gameId, modSetId)
-    if (modNames.length > 0) {
-      onProgress?.(72, '链接 MOD 文件...')
-      for (const modName of modNames) {
-        const modDir = path.join(resourceDir, gameId, 'mods', modName)
-        if (!fs.existsSync(modDir)) continue
-        linkMod(modDir, playground, stats)
+    // 3. 包覆盖（按播放集顺序，后覆盖胜出）
+    const packageNames = await getPlaySetPackageNames(resourceDir, gameId, modSetId)
+    if (packageNames.length > 0) {
+      onProgress?.(72, '链接包文件...')
+      for (const packageName of packageNames) {
+        const pkgDir = path.join(resourceDir, gameId, 'packages', packageName)
+        if (!fs.existsSync(pkgDir)) continue
+        linkMod(pkgDir, playground, stats)
       }
-      onProgress?.(96, 'MOD 文件已链接')
+      onProgress?.(96, '包文件已链接')
     }
 
-    // 4. 链接失败必须上报，不能「缺文件还返回成功」
+    // 4. 全局设置（画质/快捷键/音量）→ 从 settings/ 硬链接（包覆盖之后，启动器设置优先）
+    linkGlobalSettings(resourceDir, gameId, installPath, playground, stats)
+
+    // 5. 链接失败必须上报，不能「缺文件还返回成功」
     if (stats.failed > 0) {
       return {
         ok: false,
@@ -409,7 +469,7 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     }
 
     onProgress?.(100, '完成')
-    return { ok: true, playgroundPath: playground }
+    return { ok: true, playgroundPath: playground, mapsPath: path.join(resourceDir, gameId, 'maps') }
   } catch (e) {
     const err = e as Error
     return { ok: false, error: err.message }

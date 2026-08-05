@@ -151,7 +151,8 @@ export function writeRendererWindowedMode(
   rendererKey: string,
   renderersIni: CCIniFile,
   windowed: boolean,
-  borderless: boolean
+  borderless: boolean,
+  settingsDir?: string
 ): boolean {
   const sec = renderersIni.getSection(rendererKey)
   if (!sec) return false
@@ -166,7 +167,9 @@ export function writeRendererWindowedMode(
   const configFileName = sec.getString('ConfigFileName')
   if (!configFileName) return false
 
-  const configPath = path.join(gamePath, configFileName)
+  // 全局设置：写入 settings/（playground 硬链接，游戏读到）；未给则写安装目录
+  const configPath = path.join(settingsDir || gamePath, configFileName)
+  if (settingsDir) fs.mkdirSync(path.dirname(configPath), { recursive: true })
 
   // If config doesn't exist, copy from resources first
   if (!fs.existsSync(configPath)) {
@@ -326,7 +329,8 @@ export function writeRendererResolution(
   rendererKey: string,
   renderersIni: CCIniFile,
   width: number,
-  height: number
+  height: number,
+  settingsDir?: string
 ): boolean {
   const sec = renderersIni.getSection(rendererKey)
   if (!sec) return false
@@ -334,7 +338,9 @@ export function writeRendererResolution(
   const configFileName = sec.getString('ConfigFileName')
   if (!configFileName) return false
 
-  const configPath = path.join(gamePath, configFileName)
+  // 全局设置：写入 settings/（playground 硬链接，游戏读到）；未给则写安装目录
+  const configPath = path.join(settingsDir || gamePath, configFileName)
+  if (settingsDir) fs.mkdirSync(path.dirname(configPath), { recursive: true })
 
   // If config doesn't exist, copy from resources first
   if (!fs.existsSync(configPath)) {
