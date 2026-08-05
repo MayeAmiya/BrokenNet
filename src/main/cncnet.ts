@@ -1199,6 +1199,7 @@ export class CnCNetManager {
         this.sendToRenderer('cncnet:game-options', { channel, data })
         break
       case 'START': // 启动游戏
+        console.log(`[CnCNet] 收到 START: ${data}`)
         this.sendToRenderer('cncnet:game-start', { channel, data })
         break
       case 'GETREADY': // 准备通知（主机启动时提示玩家就绪）

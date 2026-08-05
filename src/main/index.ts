@@ -305,6 +305,7 @@ function registerCncnetHandlers(): void {
       const gameId = String(Math.floor(1000000 + Math.random() * 9000000))
       const assignments = players.map((p, i) => `${p.name};${tunnel.address}:${ports[i]}`)
       const startData = `${gameId};${assignments.join(';')}`
+      console.log(`[hostStart] 隧道=${tunnelAddress} START=${startData}`)
       cncnet.sendStart(channel, startData)
       return { ok: true, tunnel: formatTunnelAddress(tunnel), ports, startData, gameId }
     } catch (e) {

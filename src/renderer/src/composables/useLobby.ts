@@ -1242,6 +1242,11 @@ export function useLobby() {
       portsByPlayer[parts[i]] = parseInt(ipPort[ipPort.length - 1], 10) || 0
     }
 
+    // START 里隧道可能是 0.0.0.0（房主隧道分配失败/未选隧道）→ 回退到房间广播（GAME）的隧道
+    if (!tunIp || tunIp === '0.0.0.0') {
+      tunIp = room.tunnelServer ? room.tunnelServer.split(':')[0] : ''
+    }
+
     // 隧道控制端口：按地址从隧道列表解析（客户端不是房主，getHostedGame 拿不到）
     let tunPort = 0
     try {
@@ -1250,6 +1255,7 @@ export function useLobby() {
       tunPort = t?.port ?? 0
     } catch { /* 无隧道列表 */ }
 
+    console.log(`[clientLaunch] START=${data.data} -> 隧道=${tunIp}:${tunPort}`)
     await launchMultiplayer(currentGamePath.value, currentGameId.value, currentModSetId.value, room, tunIp, tunPort, portsByPlayer, false, sessionId)
     // 进入游戏信号
     await window.api.cncnet.sendCtcp(room.channelName ?? '', 'STRTD', '')
