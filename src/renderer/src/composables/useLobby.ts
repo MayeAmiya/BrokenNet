@@ -1252,6 +1252,11 @@ export function useLobby() {
       pushRoomNotice('请先在"选择服务器"里选定一个隧道服务器')
       return
     }
+    // 房主随机选项：把所有玩家 Random/选择器阵营、Random 颜色解析为具体值，广播最终 PO
+    resolveRandomOptions()
+    broadcastPlayerOptions()
+    // 选隧道时发的 CHTNL 可能早于客户端加入（空房间没人收），启动前再广播一次确保全员 CurrentTunnel 正确
+    window.api.cncnet.sendCtcp(room.channelName ?? '', 'CHTNL', selectedTunnel.value)
     const r = await window.api.cncnet.hostStart(room.channelName ?? '', humanPlayers.map((p) => ({ name: p.name })), selectedTunnel.value)
     console.log('[hostLaunch] hostStart 结果:', r)
     if (!r.ok || !r.tunnel) {
