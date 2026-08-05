@@ -74,9 +74,11 @@ async function savePlaySets(gameId: string, playSets: PlaySet[]): Promise<{ ok: 
     if (!path) return { ok: false, error: '请先设置资源目录' }
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, JSON.stringify(playSets, null, 2), 'utf-8')
+    console.log(`[savePlaySets] ${path} 写入 ${playSets.length} 个播放集: ${playSets.map(s => s.id).join(',')}`)
     return { ok: true }
   } catch (e) {
     const err = e as NodeJS.ErrnoException
+    console.error('[savePlaySets] 失败:', err.message)
     return { ok: false, error: err.message }
   }
 }
@@ -104,10 +106,15 @@ async function ensureDefaultPlaySet(gameId: string): Promise<{ ok: boolean; erro
     // 2. modsets.json mods → packages
     const setsPath = await getModSetsPath(gameId)
     let sets: Array<PlaySet & { mods?: Array<{ id: string; name: string }> }> = []
+    let readOk = false
     if (setsPath && existsSync(setsPath)) {
       try {
         sets = JSON.parse(await readFile(setsPath, 'utf-8'))
-      } catch { sets = [] }
+        readOk = true
+      } catch (e) {
+        console.error(`[Packages] modsets.json 读取失败（保留原文件）: ${(e as Error).message}`)
+        sets = []
+      }
       let changed = false
       for (const s of sets) {
         if (Array.isArray(s.mods) && !Array.isArray(s.packages)) {
@@ -137,15 +144,17 @@ async function ensureDefaultPlaySet(gameId: string): Promise<{ ok: boolean; erro
       }
     }
 
-    // 4. 确保 vanilla 播放集
-    if (!sets.some((s) => s.id === 'vanilla')) {
-      sets.unshift({
-        id: 'vanilla',
-        name: '原版',
-        description: '只加载游戏本体（MentalOmega）',
-        packages: [{ id: 'MentalOmega', name: 'MentalOmega' }]
-      })
-      await savePlaySets(gameId, sets)
+    // 4. 确保 vanilla 播放集（仅当文件不存在或成功读到时才写，避免把已有播放集覆盖掉）
+    if (readOk || !setsPath || !existsSync(setsPath)) {
+      if (!sets.some((s) => s.id === 'vanilla')) {
+        sets.unshift({
+          id: 'vanilla',
+          name: '原版',
+          description: '只加载游戏本体（MentalOmega）',
+          packages: [{ id: 'MentalOmega', name: 'MentalOmega' }]
+        })
+        await savePlaySets(gameId, sets)
+      }
     }
 
     return { ok: true }
@@ -268,6 +277,9 @@ export function registerPackageHandlers(): void {
   ipcMain.handle('modset:list', async (_e, gameId: string) => {
     return { ok: true, modSets: await loadPlaySets(gameId) }
   })
-  ipcMain.handle('modset:save', (_e, gameId: string, playSets: PlaySet[]) => savePlaySets(gameId, playSets))
+  ipcMain.handle('modset:save', (_e, gameId: string, playSets: PlaySet[]) => {
+    console.log(`[modset:save] gameId=${gameId} 收到 ${playSets?.length} 个播放集`)
+    return savePlaySets(gameId, playSets)
+  })
   ipcMain.handle('modset:ensure-default', (_e, gameId: string) => ensureDefaultPlaySet(gameId))
 }

@@ -467,6 +467,13 @@ async function handleImportResult(result: { ok: boolean; imported?: string[]; er
   }
 }
 
+function openPackagesFolder(): void {
+  void window.api.fs.openPackagesDir(props.profile.id)
+}
+function openPlaygroundFolder(): void {
+  void window.api.fs.openPlaygroundDir(props.profile.id)
+}
+
 async function importFolder(): Promise<void> {
   await handleImportResult(await window.api.package.importFolder(props.profile.id))
 }
@@ -583,7 +590,11 @@ async function loadModSets(): Promise<void> {
 }
 
 async function saveModSetsToDisk(): Promise<void> {
-  await window.api.modset.save(props.profile.id, modSets.value)
+  // 关键：Vue 的 ref/reactive 值是 Proxy，Electron IPC 无法 structured-clone（"An object could not be cloned"）。
+  // 必须深克隆成普通对象再传。
+  const plain = JSON.parse(JSON.stringify(modSets.value))
+  const r = await window.api.modset.save(props.profile.id, plain)
+  console.log('[saveModSetsToDisk]', props.profile.id, plain.length, '个播放集:', plain.map((s: any) => s.id), '->', r)
 }
 
 // 已安装的主 MOD（用于播放集右侧列表，排除 patch/addon 子项）
@@ -669,8 +680,10 @@ function selectModSet(id: string): void {
 
 /** 用指定播放集重建 playground 并记录路径（全局设置从 settings/ 硬链接，见 playground-manager） */
 async function rebuildPlayground(modSetId: string): Promise<void> {
+  console.log('[GameView] 开始重建 playground，播放集:', modSetId)
   try {
     const res = await window.api.playground.apply(props.profile.id, modSetId)
+    console.log('[GameView] playground.apply 结果:', JSON.stringify({ ok: res.ok, path: res.playgroundPath, error: res.error }))
     if (res.ok && res.playgroundPath) {
       currentPlaygroundPath.value = res.playgroundPath
       console.log('[GameView] playground 已重建:', res.playgroundPath, 'modSet:', modSetId)
@@ -1083,7 +1096,9 @@ async function loadSoundSettings(): Promise<void> {
 }
 
 async function saveSoundSettings(): Promise<void> {
-  const result = await window.api.sound.write(props.profile.id, soundValues.value)
+  // 深克隆（Vue 响应式 Proxy 不能过 IPC structured-clone）
+  const plain = JSON.parse(JSON.stringify(soundValues.value))
+  const result = await window.api.sound.write(props.profile.id, plain)
   if (result.ok) {
     toastSuccess('音量设置已保存')
   } else {
@@ -1144,7 +1159,9 @@ async function resetKeyboardBindings(): Promise<void> {
   for (const b of keyboardBindings.value) {
     b.currentKey = b.defaultKey
   }
-  await window.api.keyboard.save(props.profile.installPath, keyboardBindings.value, props.profile.id)
+  // 深克隆成普通对象（Vue 响应式 Proxy 不能过 IPC structured-clone）
+  const plain = JSON.parse(JSON.stringify(keyboardBindings.value))
+  await window.api.keyboard.save(props.profile.installPath, plain, props.profile.id)
   toastSuccess('已恢复默认快捷键')
 }
 
@@ -1621,13 +1638,21 @@ async function run(key: string): Promise<void> {
       <div v-if="!editingModSet" class="flex flex-1 flex-col overflow-y-auto px-6 py-5">
         <div class="mb-4 flex items-center justify-between">
           <h2 class="text-[15px] font-medium text-fg">播放集列表</h2>
-          <button
-            v-if="!showCreateForm"
-            class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi"
-            @click="showCreateForm = true"
-          >
-            新建播放集
-          </button>
+          <div class="flex gap-2">
+            <button
+              class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
+              @click="openPlaygroundFolder"
+            >
+              打开 playground 文件夹
+            </button>
+            <button
+              v-if="!showCreateForm"
+              class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi"
+              @click="showCreateForm = true"
+            >
+              新建播放集
+            </button>
+          </div>
         </div>
 
         <!-- 新建表单 -->
@@ -1862,6 +1887,12 @@ async function run(key: string): Promise<void> {
               @click="loadInstalledMods"
             >
               刷新
+            </button>
+            <button
+              class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
+              @click="openPackagesFolder"
+            >
+              打开包文件夹
             </button>
             <button
               class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"

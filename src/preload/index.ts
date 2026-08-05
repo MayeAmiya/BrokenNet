@@ -24,6 +24,10 @@ const api = {
       ipcRenderer.invoke('fs:open-maps-dir', gameId),
     openReplaysDir: (gameId: string): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:open-replays-dir', gameId),
+    openPackagesDir: (gameId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:open-packages-dir', gameId),
+    openPlaygroundDir: (gameId: string): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke('fs:open-playground-dir', gameId),
     listMaps: (gameId: string): Promise<{
       ok: boolean
       files: Array<{ name: string; path: string; size: number }>

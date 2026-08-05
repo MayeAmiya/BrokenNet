@@ -56,6 +56,8 @@ export function registerFsHandlers(): void {
   ipcMain.handle('fs:link-count', (_e, path: string) => linkCount(path))
   ipcMain.handle('fs:open-maps-dir', (_e, gameId: string) => openDir(gameId, 'maps'))
   ipcMain.handle('fs:open-replays-dir', (_e, gameId: string) => openDir(gameId, 'replay'))
+  ipcMain.handle('fs:open-packages-dir', (_e, gameId: string) => openDir(gameId, 'packages'))
+  ipcMain.handle('fs:open-playground-dir', (_e, gameId: string) => openDir(gameId, 'playground'))
   ipcMain.handle('fs:list-maps', (_e, gameId: string) => listDirFiles(gameId, 'maps'))
   ipcMain.handle('fs:list-replays', (_e, gameId: string) => listDirFiles(gameId, 'replay'))
   ipcMain.handle('fs:select-directory', (e) => selectDirectory(e.sender))
