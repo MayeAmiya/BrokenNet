@@ -73,6 +73,7 @@ export function launchGame(opts: LaunchGameOptions): LaunchGameResult {
   }
 
   // 启动进程
+  console.log(`[launchGame] exe=${exePath} args=${JSON.stringify(opts.args ?? [])} cwd=${opts.gameDir}`)
   try {
     gameProcess = spawn(exePath, opts.args ?? [], {
       cwd: opts.gameDir,

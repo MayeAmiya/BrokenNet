@@ -16,7 +16,7 @@ import { getResourceDir } from './resource-dir'
 import type { PlaySet, InstalledPackage, ImportResult } from '../shared/types/content'
 import { resolveDirectChild } from './security-boundaries'
 
-/** 复制游戏本体时排除的运行时写目录（MentalOmega 包只含只读资源） */
+/** 复制游戏本体时排除的运行时写目录（本体包只含只读资源） */
 export const GAME_COPY_EXCLUDE = new Set([
   'UserData', 'Saved Games', 'Screenshots', 'Client', 'EasyAntiCheat',
   'plugins', 'GeneralsOnlineGameData', 'Map Editor', 'Resources',
@@ -52,6 +52,63 @@ async function getInstallPath(gameId: string): Promise<string> {
   return ''
 }
 
+function getBasePackage(gameId: string): { name: string; displayName: string } {
+  return gameId === 'mental-omega'
+    ? { name: 'MentalOmega', displayName: 'Mental Omega' }
+    : { name: 'ZeroHour', displayName: 'Zero Hour' }
+}
+
+function getForeignBasePackage(gameId: string): string {
+  return gameId === 'mental-omega' ? 'ZeroHour' : 'MentalOmega'
+}
+
+function makeZhPackagePlaySet(packageName: string, existing?: PlaySet): PlaySet {
+  return {
+    id: `zh-package:${packageName}`,
+    name: existing?.name ?? packageName,
+    description: existing?.description ?? `以 Zero Hour 为基底，加载 ${packageName}`,
+    packages: [
+      { id: 'ZeroHour', name: 'ZeroHour' },
+      { id: packageName, name: packageName }
+    ]
+  }
+}
+
+/** ZH 固定为一个 MOD 对应一个播放集；MO 仍保留手工组合播放集。 */
+async function syncZhPackagePlaySets(packagesDir: string, sets: PlaySet[]): Promise<PlaySet[]> {
+  const entries = await readdir(packagesDir, { withFileTypes: true })
+  const packageNames = entries
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.endsWith('.downloading') && entry.name !== 'MentalOmega')
+    .map((entry) => entry.name)
+  const mainPackages = [...new Set(packageNames.filter((name) =>
+    name !== 'ZeroHour' && !name.includes('_patch_') && !name.includes('_addon_')
+  ))]
+  const vanilla = sets.find((set) => set.id === 'vanilla') ?? {
+    id: 'vanilla',
+    name: '原版',
+    description: '只加载游戏本体（Zero Hour）',
+    packages: [{ id: 'ZeroHour', name: 'ZeroHour' }]
+  }
+  vanilla.description = '只加载游戏本体（Zero Hour）'
+  vanilla.packages = [{ id: 'ZeroHour', name: 'ZeroHour' }]
+  const automaticSets = mainPackages.sort((a, b) => a.localeCompare(b)).map((name) =>
+    makeZhPackagePlaySet(name, sets.find((set) => set.id === `zh-package:${name}`))
+  )
+  const copiedSets = sets.flatMap((set) => {
+    if (!set.id.startsWith('zh-copy:')) return []
+    const mainPackage = set.packages.find((pkg) => mainPackages.includes(pkg.name))?.name
+    if (!mainPackage) return []
+    return [{
+      ...set,
+      packages: [
+        { id: 'ZeroHour', name: 'ZeroHour' },
+        { id: mainPackage, name: mainPackage }
+      ]
+    }]
+  })
+  return [vanilla, ...automaticSets, ...copiedSets]
+}
+
 /** 加载播放集（兼容旧 mods 字段） */
 async function loadPlaySets(gameId: string): Promise<PlaySet[]> {
   try {
@@ -59,10 +116,18 @@ async function loadPlaySets(gameId: string): Promise<PlaySet[]> {
     if (!path) return []
     const data = await readFile(path, 'utf-8')
     const sets = JSON.parse(data) as Array<PlaySet & { mods?: Array<{ id: string; name: string }> }>
-    return sets.map((s) => ({
-      ...s,
-      packages: s.packages ?? s.mods ?? []
-    }))
+    const foreignBase = getForeignBasePackage(gameId)
+    return sets
+      .map((s) => ({
+        ...s,
+        packages: (s.packages ?? s.mods ?? []).filter((pkg) =>
+          pkg.id !== foreignBase &&
+          pkg.name !== foreignBase &&
+          !pkg.id.endsWith('.downloading') &&
+          !pkg.name.endsWith('.downloading')
+        )
+      }))
+      .filter((s) => !s.id.endsWith(`:${foreignBase}`) && !s.id.endsWith('.downloading') && s.packages.length > 0)
   } catch {
     return []
   }
@@ -88,7 +153,7 @@ async function savePlaySets(gameId: string, playSets: PlaySet[]): Promise<{ ok: 
  * 迁移旧 mod 体系 → 包体系（幂等）：
  * 1. mods/ → packages/（packages 不存在时才重命名；两者都在则 packages 为准）
  * 2. modsets.json mods 字段 → packages
- * 3. 确保 packages/MentalOmega（游戏本体）
+ * 3. 确保当前游戏自己的本体包
  * 4. 确保 vanilla 播放集
  */
 async function ensureDefaultPlaySet(gameId: string): Promise<{ ok: boolean; error?: string }> {
@@ -96,13 +161,27 @@ async function ensureDefaultPlaySet(gameId: string): Promise<{ ok: boolean; erro
     const packagesDir = await getPackagesDir(gameId)
     const legacyModsDir = join(packagesDir, '..', 'mods')
 
-    // 1. mods/ → packages/
+    // 1. mods/ → packages/。若两个目录都存在，逐包迁移，不能因为本体包已创建就跳过旧 MOD。
     if (!existsSync(packagesDir) && existsSync(legacyModsDir)) {
       await mkdir(dirname(packagesDir), { recursive: true })
       await rename(legacyModsDir, packagesDir)
       console.log(`[Packages] 已迁移 mods/ -> packages/ (${gameId})`)
     }
     await mkdir(packagesDir, { recursive: true })
+    if (existsSync(legacyModsDir)) {
+      const legacyEntries = await readdir(legacyModsDir, { withFileTypes: true })
+      for (const entry of legacyEntries) {
+        if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name.endsWith('.downloading')) continue
+        const source = join(legacyModsDir, entry.name)
+        const target = join(packagesDir, entry.name)
+        if (existsSync(target)) {
+          console.warn(`[Packages] 旧包迁移跳过，目标已存在: ${entry.name}`)
+          continue
+        }
+        await rename(source, target)
+        console.log(`[Packages] 已迁移旧包 ${entry.name}: mods/ -> packages/`)
+      }
+    }
 
     // 2. modsets.json mods → packages
     const setsPath = await getModSetsPath(gameId)
@@ -127,8 +206,9 @@ async function ensureDefaultPlaySet(gameId: string): Promise<{ ok: boolean; erro
       if (changed) await savePlaySets(gameId, sets)
     }
 
-    // 3. 确保 packages/MentalOmega（游戏本体）
-    const basePkgDir = join(packagesDir, 'MentalOmega')
+    // 3. 每个游戏维护自己的本体包，不能让 MO 本体进入 ZH 播放集。
+    const basePackage = getBasePackage(gameId)
+    const basePkgDir = join(packagesDir, basePackage.name)
     if (!existsSync(basePkgDir)) {
       const installPath = await getInstallPath(gameId)
       if (installPath && existsSync(installPath)) {
@@ -145,17 +225,31 @@ async function ensureDefaultPlaySet(gameId: string): Promise<{ ok: boolean; erro
       }
     }
 
-    // 4. 确保 vanilla 播放集（仅当文件不存在或成功读到时才写，避免把已有播放集覆盖掉）
+    // 4. 确保 vanilla 播放集指向当前游戏本体；修复早期 ZH 误引用 MentalOmega 的数据。
     if (readOk || !setsPath || !existsSync(setsPath)) {
-      if (!sets.some((s) => s.id === 'vanilla')) {
+      const vanilla = sets.find((s) => s.id === 'vanilla')
+      if (!vanilla) {
         sets.unshift({
           id: 'vanilla',
           name: '原版',
-          description: '只加载游戏本体（MentalOmega）',
-          packages: [{ id: 'MentalOmega', name: 'MentalOmega' }]
+          description: `只加载游戏本体（${basePackage.displayName}）`,
+          packages: [{ id: basePackage.name, name: basePackage.name }]
         })
         await savePlaySets(gameId, sets)
+      } else if (
+        vanilla.packages.length !== 1 ||
+        vanilla.packages[0]?.id !== basePackage.name ||
+        vanilla.packages[0]?.name !== basePackage.name
+      ) {
+        vanilla.description = `只加载游戏本体（${basePackage.displayName}）`
+        vanilla.packages = [{ id: basePackage.name, name: basePackage.name }]
+        await savePlaySets(gameId, sets)
       }
+    }
+
+    if (gameId === 'zero-hour') {
+      sets = await syncZhPackagePlaySets(packagesDir, sets)
+      await savePlaySets(gameId, sets)
     }
 
     return { ok: true }
@@ -172,7 +266,7 @@ async function listPackages(gameId: string): Promise<InstalledPackage[]> {
     await mkdir(packagesDir, { recursive: true })
     const entries = await readdir(packagesDir, { withFileTypes: true })
     return entries
-      .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+      .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.endsWith('.downloading') && e.name !== getForeignBasePackage(gameId))
       .map((e) => ({ name: e.name, path: join(packagesDir, e.name) }))
   } catch {
     return []
@@ -280,6 +374,12 @@ export function registerPackageHandlers(): void {
   })
   ipcMain.handle('modset:save', (_e, gameId: string, playSets: PlaySet[]) => {
     console.log(`[modset:save] gameId=${gameId} 收到 ${playSets?.length} 个播放集`)
+    if (gameId === 'zero-hour') {
+      return getPackagesDir(gameId).then(async (packagesDir) => {
+        const normalized = await syncZhPackagePlaySets(packagesDir, playSets)
+        return savePlaySets(gameId, normalized)
+      })
+    }
     return savePlaySets(gameId, playSets)
   })
   ipcMain.handle('modset:ensure-default', (_e, gameId: string) => ensureDefaultPlaySet(gameId))

@@ -113,7 +113,7 @@ function serializeOptions(options: GameOptions): string {
 }
 
 /** 读取 Options.ini */
-async function readOptions(gameType: 'zh' | 'gen'): Promise<GameOptions> {
+export async function readOptions(gameType: 'zh' | 'gen'): Promise<GameOptions> {
   const filePath = getOptionsPath(gameType)
   try {
     const content = await readFile(filePath, 'utf-8')
@@ -125,8 +125,9 @@ async function readOptions(gameType: 'zh' | 'gen'): Promise<GameOptions> {
 }
 
 /** 写入 Options.ini */
-async function writeOptions(gameType: 'zh' | 'gen', options: GameOptions): Promise<void> {
+export async function writeOptions(gameType: 'zh' | 'gen', options: GameOptions): Promise<void> {
   const filePath = getOptionsPath(gameType)
+  console.log(`[options:write] ${gameType} -> ${filePath} Windowed=${options.Windowed}`)
   await mkdir(dirname(filePath), { recursive: true })
   await writeFile(filePath, serializeOptions(options), 'utf-8')
 }
@@ -147,7 +148,9 @@ export function registerOptionsHandlers(): void {
   // 写入画质设置
   ipcMain.handle('options:write', async (_e, gameType: 'zh' | 'gen', options: GameOptions) => {
     try {
-      await writeOptions(gameType, options)
+      // UI 只提交它负责的字段；保留音量、网络和游戏内的其它 Options.ini 项。
+      const current = await readOptions(gameType)
+      await writeOptions(gameType, { ...current, ...options })
       return { ok: true }
     } catch (e) {
       const err = e as Error

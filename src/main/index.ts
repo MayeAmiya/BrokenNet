@@ -41,6 +41,8 @@ import { loadMusicThemes } from './music-theme-reader'
 import { readMultiplayerLobbyOptions } from './game-options-reader'
 import { applyPlayground } from './playground-manager'
 import { isAllowedExternalUrl } from './security-boundaries'
+import { loadZhSinglePlayer } from './zh-singleplayer-reader'
+import { findBigWithGameData, setBigCameraHeight } from './big-reader'
 
 const isDev = !app.isPackaged
 
@@ -200,12 +202,26 @@ function registerWindowHandlers(): void {
 }
 
 function registerGameHandlers(): void {
-  ipcMain.handle('game:launch', (_event, opts: {
+  ipcMain.handle('game:launch', async (_event, opts: {
     gameDir: string
     exe: string
     spawnOptions: SpawnIniOptions
     args?: string[]
+    /** ZH 视角高度：>0 时启动前原地改写 GameData.ini 所在 .big（playground 里硬链接的，改即生效） */
+    cameraHeight?: number
   }) => {
+    if (opts.cameraHeight && opts.cameraHeight > 0) {
+      try {
+        const big = await findBigWithGameData(opts.gameDir)
+        if (big) {
+          const ok = await setBigCameraHeight(big, opts.cameraHeight)
+          if (ok) console.log(`[ZH] 已写视角高度 ${opts.cameraHeight} -> ${big}`)
+          else console.warn('[ZH] 未找到可写的 GameData.ini .big')
+        }
+      } catch (e) {
+        console.error('[ZH] 写视角高度失败:', e)
+      }
+    }
     return launchGame({
       ...opts,
       onExit: (code) => {
@@ -628,6 +644,9 @@ function registerIniHandlers(): void {
   // Campaign
   ipcMain.handle('campaign:load', (_event, gamePath: string) => {
     return loadCampaignData(gamePath)
+  })
+  ipcMain.handle('zh-singleplayer:load', (_event, gamePath: string, includeCampaigns: boolean) => {
+    return loadZhSinglePlayer(gamePath, includeCampaigns)
   })
 
   // Translation

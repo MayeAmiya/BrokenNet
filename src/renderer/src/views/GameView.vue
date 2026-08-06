@@ -9,6 +9,7 @@ import { useGameConfig } from '@renderer/composables/useGameConfig'
 import { computeLaunchGameOptions } from '@renderer/composables/gameOptions'
 import LobbyView from './LobbyView.vue'
 import CampaignSelector from '@renderer/components/campaign/CampaignSelector.vue'
+import ZhSinglePlayerSelector from '@renderer/components/campaign/ZhSinglePlayerSelector.vue'
 import KeyboardVisual from '@renderer/components/KeyboardVisual.vue'
 import { useCampaign } from '@renderer/composables/useCampaign'
 
@@ -65,7 +66,7 @@ const isMentalOmega = computed(() => props.profile.id === 'mental-omega')
 const tabs = computed(() => {
   const allTabs = [
     { id: 'modsets', label: '播放集管理', disabled: !samePartition.value },
-    { id: 'campaign', label: '单人战役' },
+    { id: 'campaign', label: isMentalOmega.value ? '单人战役' : '单人模式' },
     { id: 'multiplayer', label: '多人联机', disabled: !isMentalOmega.value, tip: !isMentalOmega.value ? '绝命时刻联机暂未支持（ZH 走独立联机逻辑，不复用 MO 的 CnCNet 路径）' : undefined },
     { id: 'replays', label: '统计', disabled: !samePartition.value },
     { id: 'mods', label: '包管理' },
@@ -289,6 +290,12 @@ const isDownloading = computed(() => {
 
 // 下载 MOD（首次安装）
 async function downloadMod(mod: RepoMod): Promise<void> {
+  await readInstalledMods()
+  if (installedMods.value.some((installed) => installed.name === mod.ModName)) {
+    downloadProgress.value.delete(mod.ModName)
+    toastSuccess(`「${mod.ModName}」已经安装`)
+    return
+  }
   downloadProgress.value.set(mod.ModName, { status: 'downloading', progress: 0 })
 
   const manifestResult = await window.api.mod.fetchManifest(mod.ModLink)
@@ -307,6 +314,12 @@ async function downloadMod(mod: RepoMod): Promise<void> {
 
   const result = await window.api.mod.download(downloadUrl, props.profile.id, mod.ModName)
   if (!result.ok) {
+    if (result.alreadyInstalled) {
+      downloadProgress.value.delete(mod.ModName)
+      await loadInstalledMods()
+      toastSuccess(`「${mod.ModName}」已经安装`)
+      return
+    }
     downloadProgress.value.set(mod.ModName, { status: 'error', progress: 0 })
     return
   }
@@ -339,7 +352,7 @@ async function modifyMod(mod: RepoMod): Promise<void> {
       const manifest = manifestResult.manifest as Record<string, unknown>
       const downloadUrl = manifest.SimpleDownloadLink as string
       if (downloadUrl) {
-        const r = await window.api.mod.download(downloadUrl, props.profile.id, mod.ModName)
+        const r = await window.api.mod.download(downloadUrl, props.profile.id, mod.ModName, true)
         if (r.ok) {
           const version = manifest.Version as string ?? ''
           if (version) await window.api.mod.setVersion(props.profile.id, mod.ModName, version)
@@ -449,10 +462,18 @@ async function deleteMod(modName: string): Promise<void> {
 }
 
 // 加载已安装的包（ZH 下载 UI 的"已安装"标记 + 播放集右栏可用包都靠它）
-async function loadInstalledMods(): Promise<void> {
+async function readInstalledMods(): Promise<void> {
   const result = await window.api.package.list(props.profile.id)
   if (result.ok) {
     installedMods.value = result.packages
+  }
+}
+
+async function loadInstalledMods(): Promise<void> {
+  await readInstalledMods()
+  if (!isMentalOmega.value) {
+    await window.api.modset.ensureDefault(props.profile.id)
+    await loadModSets()
   }
 }
 
@@ -627,9 +648,9 @@ function handleDropdownClickOutside(e: MouseEvent): void {
 onMounted(async () => {
   document.addEventListener('click', handleDropdownClickOutside)
   resourceDir.value = (await window.api.fs.getConfig('resourceDir')) ?? ''
-  await loadInstalledMods()
   // 确保默认"原版"播放集存在（游戏本体视为包），再加载播放集
   await window.api.modset.ensureDefault(props.profile.id)
+  await readInstalledMods()
   await loadModSets() // 内部会恢复上次选中的播放集
   // 首次用当前播放集重建 playground（地图/战役数据源），再初始化战役
   await rebuildPlayground(selectedModSetId.value)
@@ -709,7 +730,19 @@ async function launch(): Promise<void> {
       ? `${props.profile.gtdPath}\\GeneralsTD.exe`
       : `${props.profile.generalsPath}\\Generals.exe`
   // MO 启动：Syringe.exe "gamemd.exe" -SPAWN -CD ... （Syringe 第一个参数是游戏本体名）
-  const args = isMO ? ['"gamemd.exe"', '-SPAWN', '-CD', '-SPEEDCONTROL', '-LOG', '-AFFINITY:65535'] : []
+  // ZH 直接启动：generals.exe [-win]，不走 spawn.ini（对齐 GenLauncher）
+  // 窗口化判定：windowMode 可能没加载（从播放集管理直接启动时 settings 没开过），
+  // 这时读 Options.ini 的 Windowed 判断 —— 窗口化就传 -win。
+  let windowed = windowMode.value === 'windowed' || windowMode.value === 'borderless'
+  if (!isMO && !useGtd.value) {
+    try {
+      const res = await window.api.options.read(getGameType())
+      if (res?.options?.Windowed?.trim() === 'yes') windowed = true
+    } catch { /* 读不到用 UI 状态 */ }
+  }
+  const args = isMO
+    ? ['"gamemd.exe"', '-SPAWN', '-CD', '-SPEEDCONTROL', '-LOG', '-AFFINITY:65535']
+    : (windowed ? ['-win'] : [])
 
   try {
     // 构建当前播放集的 playground 工作区（游戏从 playground 运行），期间显示进度
@@ -743,6 +776,8 @@ async function launch(): Promise<void> {
         gameDir,
         exe: exe.split('\\').pop() ?? 'Syringe.exe',
         args,
+        // ZH 视角高度：自定义时启动前原地改 GameData.ini 的 .big（playground 硬链接的）
+        cameraHeight: isMO ? undefined : (zhUseCustomCamera.value ? zhCameraHeight.value : 0),
         spawnOptions: {
           mode: 'skirmish',
           gameDir,
@@ -768,6 +803,24 @@ async function launch(): Promise<void> {
   } finally {
     launching.value = false
   }
+}
+
+/** 播放集管理里「启动游戏」：先把该播放集设为当前（未选中时），再走正常启动链 */
+async function launchPlaySetFromCard(mod: ModSet): Promise<void> {
+  if (launching.value) return
+  if (mod.id !== selectedModSetId.value) {
+    selectedModSetId.value = mod.id
+    localStorage.setItem(modSetStorageKey.value, mod.id)
+  }
+  await launch()
+}
+
+/** 播放集管理右上角「启动游戏」：启动当前选中的播放集 */
+async function launchSelectedPlaySet(): Promise<void> {
+  if (launching.value) return
+  const mod = selectedModSet.value
+  if (!mod) return
+  await launchPlaySetFromCard(mod)
 }
 
 function startEdit(mod: ModSet): void {
@@ -841,7 +894,7 @@ function copyModSet(mod: ModSet): void {
   const base = mod.name.replace(/\s*（副本）\s*$/, '')
   const copy: ModSet = {
     ...mod,
-    id: `mod-${Date.now()}`,
+    id: isMentalOmega.value ? `mod-${Date.now()}` : `zh-copy:${mod.packages[1]?.name ?? 'vanilla'}:${Date.now()}`,
     name: `${base}（副本）`,
     packages: mod.packages.map((p) => ({ ...p }))
   }
@@ -919,8 +972,26 @@ const graphicsSaving = ref(false)
 // 画质选项
 const resolution = ref('1920×1080')
 const resolutionList = ref<string[]>([])
+const zhOptions = ref<Record<string, string>>({})
+const zhMaxParticleCount = ref(2500)
+const zhTextureQuality = ref(1)
+// 视角高度（对齐 GenLauncher）：CameraHeight=0 用默认视角；>0 自定义（滑杆 310–850）
+const zhCameraHeight = ref(310)
+const zhUseCustomCamera = ref(false)
+// ZH 窗口模式：Options.ini Windowed，启动时传 -win
 const windowMode = ref<'fullscreen' | 'windowed' | 'borderless'>('fullscreen')
-const renderer = ref('default')
+const ZH_GRAPHICS_TOGGLES = [
+  { key: 'UseShadowVolumes', label: '3D 阴影' },
+  { key: 'UseShadowDecals', label: '2D 阴影' },
+  { key: 'UseCloudMap', label: '云层阴影' },
+  { key: 'ShowTrees', label: '场景物件' },
+  { key: 'BuildingOcclusion', label: '建筑物遮挡' },
+  { key: 'ExtraAnimations', label: '额外动画' },
+  { key: 'UseLightMap', label: '额外地面光照' },
+  { key: 'ShowSoftWaterEdge', label: '平滑水面边缘' },
+  { key: 'HeatEffects', label: '热浪效果' },
+  { key: 'UseAlternateMouse', label: '备用鼠标' }
+]
 
 // MO 画质选项（不依赖 Options.ini，直接从渲染补丁的 ddraw.ini 读写）
 const MO_RESOLUTION_LIST = [
@@ -945,7 +1016,7 @@ const MO_DETAIL_LEVELS = [
 
 // 判断游戏类型
 function getGameType(): 'zh' | 'gen' {
-  return props.profile.generalsPath ? 'gen' : 'zh'
+  return props.profile.id === 'zero-hour' ? 'zh' : 'gen'
 }
 
 // 加载画质设置
@@ -1008,17 +1079,16 @@ async function loadGraphicsSettings(): Promise<void> {
 
     if (optionsResult.ok && optionsResult.options) {
       const opts = optionsResult.options
+      zhOptions.value = { ...opts }
       resolution.value = (opts.Resolution?.trim().replace(/\s+/g, '×') ?? '1920×1080')
-
-      // 窗口模式
-      const windowed = opts.Windowed?.trim() === 'yes'
-      const borderless = opts.Borderless?.trim() === 'yes'
-      if (borderless) windowMode.value = 'borderless'
-      else if (windowed) windowMode.value = 'windowed'
-      else windowMode.value = 'fullscreen'
-
-      // 渲染器
-      renderer.value = opts.Renderer?.trim() ?? 'default'
+      zhMaxParticleCount.value = Number.parseInt(opts.MaxParticleCount?.trim() ?? '2500', 10) || 2500
+      const textureReduction = Number.parseInt(opts.TextureReduction?.trim() ?? '1', 10)
+      zhTextureQuality.value = Math.max(0, Math.min(2, 2 - textureReduction))
+      const cameraHeight = Number.parseInt(opts.CameraHeight?.trim() ?? '0', 10)
+      zhUseCustomCamera.value = cameraHeight > 0
+      zhCameraHeight.value = cameraHeight > 0 ? Math.max(310, Math.min(850, cameraHeight)) : 310
+      // 窗口模式：Options.ini Windowed（对齐 GenLauncher，启动时传 -win）
+      windowMode.value = opts.Windowed?.trim() === 'yes' ? 'windowed' : 'fullscreen'
     }
 
     if (resolutionsResult.list) {
@@ -1070,10 +1140,12 @@ async function saveGraphicsSettings(): Promise<void> {
       // ===== 绝命时刻：写入 Options.ini =====
       const gameType = getGameType()
       const options: Record<string, string> = {
+        ...zhOptions.value,
         Resolution: ' ' + resolution.value.replace('×', ' '),
-        Windowed: windowMode.value === 'windowed' ? ' yes' : ' no',
-        Borderless: windowMode.value === 'borderless' ? ' yes' : ' no',
-        Renderer: ' ' + renderer.value
+        MaxParticleCount: ' ' + Math.max(100, Math.min(5000, Math.round(zhMaxParticleCount.value))),
+        TextureReduction: ' ' + (2 - zhTextureQuality.value),
+        CameraHeight: ' ' + (zhUseCustomCamera.value ? Math.max(310, Math.min(850, Math.round(zhCameraHeight.value))) : 0),
+        Windowed: windowMode.value === 'windowed' || windowMode.value === 'borderless' ? ' yes' : ' no'
       }
       await window.api.options.write(gameType, options)
     }
@@ -1086,7 +1158,7 @@ async function saveGraphicsSettings(): Promise<void> {
 watch(activeTab, (tab) => {
   if (tab === 'settings') {
     loadGraphicsSettings()
-    loadSoundSettings()
+    if (isMentalOmega.value) loadSoundSettings()
   }
   if (tab === 'keyboard') {
     loadKeyboardBindings()
@@ -1123,15 +1195,23 @@ async function saveSoundSettings(): Promise<void> {
 
 /** 统一保存：画质 + 音量（设置页只留一个保存按钮） */
 async function saveAllSettings(): Promise<void> {
-  await saveGraphicsSettings()
-  await saveSoundSettings()
+  if (!useGtd.value) await saveGraphicsSettings()
+  if (isMentalOmega.value) await saveSoundSettings()
   toastSuccess('设置已保存')
 }
 
 /** 统一重新加载：画质 + 音量 */
 async function reloadAllSettings(): Promise<void> {
-  await loadGraphicsSettings()
-  await loadSoundSettings()
+  if (!useGtd.value) await loadGraphicsSettings()
+  if (isMentalOmega.value) await loadSoundSettings()
+}
+
+function zhOptionEnabled(key: string): boolean {
+  return zhOptions.value[key]?.trim() === 'yes'
+}
+
+function setZhOption(key: string, enabled: boolean): void {
+  zhOptions.value = { ...zhOptions.value, [key]: enabled ? ' yes' : ' no' }
 }
 
 // ==================== 快捷键设置 ====================
@@ -1648,6 +1728,15 @@ async function run(key: string): Promise<void> {
         <div class="mb-4 flex items-center justify-between">
           <h2 class="text-[15px] font-medium text-fg">播放集列表</h2>
           <div class="flex gap-2">
+            <!-- ZH 非 GeneralsTD：启动当前选中的播放集 -->
+            <button
+              v-if="!isMentalOmega && !useGtd"
+              class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi disabled:opacity-50"
+              :disabled="launching || !selectedModSet"
+              @click="launchSelectedPlaySet"
+            >
+              {{ launching ? '启动中...' : `启动游戏（${selectedModSet?.name ?? ''}）` }}
+            </button>
             <button
               class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
               @click="openPlaygroundFolder"
@@ -1655,7 +1744,7 @@ async function run(key: string): Promise<void> {
               打开 playground 文件夹
             </button>
             <button
-              v-if="!showCreateForm"
+              v-if="isMentalOmega && !showCreateForm"
               class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi"
               @click="showCreateForm = true"
             >
@@ -1722,7 +1811,7 @@ async function run(key: string): Promise<void> {
           <div class="flex gap-2">
             <button
               v-if="selectedModSetId !== mod.id"
-              class="bg-accent px-3 py-1 text-[12px] text-white hover:bg-accent-hi"
+              class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-fg"
               @click="selectModSet(mod.id)"
             >
               启用
@@ -1734,13 +1823,14 @@ async function run(key: string): Promise<void> {
               修改
             </button>
             <button
+              v-if="mod.id !== 'vanilla'"
               class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-fg"
               @click="copyModSet(mod)"
             >
               复制
             </button>
             <button
-              v-if="mod.id !== 'vanilla'"
+              v-if="isMentalOmega && mod.id !== 'vanilla'"
               class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-red-400"
               @click="confirmDeleteModSet(mod)"
             >
@@ -1791,8 +1881,16 @@ async function run(key: string): Promise<void> {
           </label>
         </div>
 
-        <!-- 两栏布局 -->
-        <div class="flex flex-1 overflow-hidden">
+        <div v-if="!isMentalOmega" class="flex flex-1 flex-col items-center justify-center px-6 text-center">
+          <p class="text-[13px] text-fg">ZH MOD 作为一个完整 package 使用</p>
+          <p class="mt-2 text-[12px] text-fg-dim">
+            {{ editingModSet.packages.map(p => p.name).join(' → ') }}
+          </p>
+          <p class="mt-1 text-[11px] text-fg-dim">只能修改播放集名称和描述，MOD 内部不能插入、移除或重排其他包。</p>
+        </div>
+
+        <!-- MO 两栏包编辑布局 -->
+        <div v-else class="flex flex-1 overflow-hidden">
           <!-- 左侧：播放集中的 MOD（可拖拽排序） -->
           <div class="flex flex-1 flex-col border-r border-line">
             <div class="border-b border-line px-4 py-2 text-[12px] text-fg-dim">
@@ -2345,8 +2443,15 @@ async function run(key: string): Promise<void> {
     <!-- 战役模式 -->
     <div v-else-if="activeTab === 'campaign'" class="flex flex-1 flex-col overflow-hidden w-full min-h-0">
       <CampaignSelector
+        v-if="isMentalOmega"
         :game-dir="profile.installPath"
         :exe="profile.id === 'mental-omega' ? 'Syringe.exe' : profile.useGtd && profile.gtdPath ? 'GeneralsTD.exe' : 'Generals.exe'"
+      />
+      <ZhSinglePlayerSelector
+        v-else
+        :game-path="currentPlaygroundPath || profile.installPath"
+        :original="selectedModSetId === 'vanilla'"
+        :revision="playgroundRevision"
       />
     </div>
 
@@ -2469,14 +2574,14 @@ async function run(key: string): Promise<void> {
           <div class="flex gap-2">
             <button
               class="border border-line px-3 py-1.5 text-[12px] text-fg-dim hover:text-fg"
-              :disabled="graphicsLoading || soundLoading"
+              :disabled="useGtd || graphicsLoading || soundLoading"
               @click="reloadAllSettings"
             >
               重新加载
             </button>
             <button
               class="bg-accent px-3 py-1.5 text-[12px] text-white hover:bg-accent-hi disabled:opacity-50"
-              :disabled="graphicsLoading || graphicsSaving || soundLoading"
+              :disabled="useGtd || graphicsLoading || graphicsSaving || soundLoading"
               @click="saveAllSettings"
             >
               {{ graphicsSaving ? '保存中...' : '保存' }}
@@ -2578,7 +2683,12 @@ async function run(key: string): Promise<void> {
                 </div>
               </div>
 
-              <!-- 绝命时刻 -->
+              <!-- GeneralsTD 的画质配置格式将在引擎接入阶段单独实现。 -->
+              <div v-else-if="useGtd" class="py-8 text-center text-[13px] text-fg-dim">
+                GeneralsTD 画质设置暂未实现
+              </div>
+
+              <!-- 原版绝命时刻：对齐 GenLauncher 的 Options.ini 画质项。 -->
               <div v-else class="space-y-4">
                 <div>
                   <label class="mb-1 block text-[12px] text-fg-dim">分辨率</label>
@@ -2596,60 +2706,79 @@ async function run(key: string): Promise<void> {
                     </label>
                     <label class="flex items-center gap-2 text-[13px]">
                       <input v-model="windowMode" type="radio" value="windowed" class="accent-accent" />
-                      <span class="text-fg">窗口化</span>
-                    </label>
-                    <label class="flex items-center gap-2 text-[13px]">
-                      <input v-model="windowMode" type="radio" value="borderless" class="accent-accent" />
-                      <span class="text-fg">无边框窗口化</span>
+                      <span class="text-fg">窗口化（启动传 -win）</span>
                     </label>
                   </div>
                 </div>
 
                 <div>
-                  <label class="mb-1 block text-[12px] text-fg-dim">渲染器</label>
-                  <select v-model="renderer" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg">
-                    <option v-if="iniRendererList.length === 0" value="default">默认</option>
-                    <option v-for="r in iniRendererList" :key="r.value" :value="r.value">{{ r.label }}</option>
+                  <div class="mb-1 flex items-center justify-between text-[12px]">
+                    <label class="text-fg-dim">最大粒子数</label>
+                    <span class="text-fg">{{ zhMaxParticleCount }}</span>
+                  </div>
+                  <input v-model.number="zhMaxParticleCount" type="range" min="100" max="5000" step="100" class="w-full accent-accent" />
+                </div>
+
+                <div>
+                  <label class="mb-1 block text-[12px] text-fg-dim">纹理质量</label>
+                  <select v-model.number="zhTextureQuality" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg">
+                    <option :value="0">低</option>
+                    <option :value="1">中</option>
+                    <option :value="2">高</option>
                   </select>
                 </div>
 
-                <!-- 游戏选项（来自 GameOptions.ini） -->
-                <template v-if="iniGameOptions">
-                  <div v-if="iniGameOptions.multiplayerLobby.checkBoxes.length > 0">
-                    <label class="mb-2 block text-[12px] text-fg-dim">游戏选项</label>
-                    <div class="grid grid-cols-2 gap-2">
-                      <label
-                        v-for="cb in iniGameOptions.multiplayerLobby.checkBoxes.filter(c => c.visible !== false)"
-                        :key="cb.controlName"
-                        class="flex items-center gap-2 text-[12px] text-fg"
-                        :title="cb.toolTip"
-                      >
-                        <input type="checkbox" class="accent-accent" />
-                        <span>{{ cb.text }}</span>
-                      </label>
-                    </div>
+                <div>
+                  <label class="mb-2 block text-[12px] text-fg-dim">画质选项</label>
+                  <div class="grid grid-cols-2 gap-2">
+                    <label v-for="option in ZH_GRAPHICS_TOGGLES" :key="option.key" class="flex items-center gap-2 text-[12px] text-fg">
+                      <input
+                        type="checkbox"
+                        class="accent-accent"
+                        :checked="zhOptionEnabled(option.key)"
+                        @change="setZhOption(option.key, ($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>{{ option.label }}</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-[12px] text-fg">
+                      <input
+                        type="checkbox"
+                        class="accent-accent"
+                        :checked="zhOptions.DynamicLOD?.trim() === 'no'"
+                        @change="setZhOption('DynamicLOD', !($event.target as HTMLInputElement).checked)"
+                      />
+                      <span>禁用动态细节层次</span>
+                    </label>
                   </div>
+                </div>
 
-                  <div v-if="iniGameOptions.multiplayerLobby.dropDowns.length > 0">
-                    <label class="mb-2 block text-[12px] text-fg-dim">游戏参数</label>
-                    <div class="grid grid-cols-2 gap-3">
-                      <div v-for="dd in iniGameOptions.multiplayerLobby.dropDowns" :key="dd.controlName">
-                        <label class="mb-0.5 block text-[11px] text-fg-dim">{{ dd.toolTip || dd.optionName }}</label>
-                        <select class="w-full border border-line bg-bg px-2 py-1 text-[12px] text-fg">
-                          <option v-for="(item, i) in dd.items" :key="i" :value="i">
-                            {{ dd.itemLabels?.[i]?.trim() ?? item.trim() }}
-                          </option>
-                        </select>
-                      </div>
-                    </div>
+                <!-- 视角高度（对齐 GenLauncher：默认视角 / 自定义 310–850） -->
+                <div>
+                  <label class="mb-2 block text-[12px] text-fg-dim">视角高度</label>
+                  <div class="space-y-2">
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="zhUseCustomCamera" type="radio" :value="false" class="accent-accent" />
+                      <span class="text-fg">默认视角</span>
+                    </label>
+                    <label class="flex items-center gap-2 text-[13px]">
+                      <input v-model="zhUseCustomCamera" type="radio" :value="true" class="accent-accent" />
+                      <span class="text-fg">自定义视角</span>
+                    </label>
                   </div>
-                </template>
+                  <div v-if="zhUseCustomCamera" class="mt-2">
+                    <div class="mb-1 flex items-center justify-between text-[12px]">
+                      <span class="text-fg-dim">高度</span>
+                      <span class="text-fg">{{ zhCameraHeight }}</span>
+                    </div>
+                    <input v-model.number="zhCameraHeight" type="range" min="310" max="850" step="10" class="w-full accent-accent" />
+                  </div>
+                </div>
               </div>
             </template>
           </section>
 
           <!-- 音量设置（右） -->
-          <section class="flex-1 rounded border border-line bg-panel p-4">
+          <section v-if="isMentalOmega" class="flex-1 rounded border border-line bg-panel p-4">
             <h3 class="mb-4 text-[13px] font-medium text-fg">音量设置</h3>
             <div class="space-y-4">
               <div v-for="s in soundSliders" :key="s.key">

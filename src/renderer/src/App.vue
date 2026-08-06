@@ -93,7 +93,7 @@ function onUpdateProfile(profile: GameProfile): void {
       <ActivityBar :current="current" @select="onSelect" />
 
       <main class="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        <GameView v-if="activeGame" :profile="activeGame" @update-profile="onUpdateProfile" />
+        <GameView v-if="activeGame" :key="activeGame.id" :profile="activeGame" @update-profile="onUpdateProfile" />
         <SettingsView v-else-if="current === 'settings'" />
         <AccountView v-else-if="current === 'account'" />
         <AddGameView v-else-if="current === 'add'" @add="onAddGame" />

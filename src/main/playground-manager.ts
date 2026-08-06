@@ -3,7 +3,7 @@
  *
  * 思路：
  *   playground = 当前生效的游戏目录。点启动时按当前播放集重建：
- *   - 游戏本体包 MentalOmega（安装目录的完整拷贝）→ 硬链接进 playground
+ *   - 当前游戏本体包（安装目录的完整拷贝）→ 硬链接进 playground
  *   - 播放集其他 MOD 包 → 硬链接覆盖（后链接覆盖先链接）
  *   - 可写目录（存档/客户端数据等）→ junction 指向该播放集独立的存档目录，
  *     首次从本体包播种；游戏新增/修改落在那儿，重建不丢、各播放集互不干扰
@@ -76,12 +76,20 @@ function isConfigFile(name: string): boolean {
  * 存 resourceDir/<gameId>/settings/，playground 构建时硬链接进去（包覆盖后再链接，启动器设置优先）。
  * 游戏运行时的修改通过硬链接写回 settings/，重建 playground 不丢。
  */
-const GLOBAL_SETTINGS_REL = new Set([
-  'ddraw.ini', // 画质：分辨率/窗口模式/渲染器（游戏根目录）
-  'Resources/Renderers.ini', // 画质：渲染器列表
-  'KeyboardMD.ini', // 快捷键（用户改键覆盖项，游戏只读这个；KeyboardCommands.ini 是游戏自带定义，不用管）
-  'RA2MO.ini' // 音量/游戏设置（settingsFile）
-])
+/** 全局设置文件（按游戏）：MO 走 ddraw/RA2MO/KeyboardMD 这套；ZH 用游戏自己的 Options.ini，不走这里 */
+const GLOBAL_SETTINGS_REL_BY_GAME: Record<string, string[]> = {
+  'mental-omega': [
+    'ddraw.ini', // 画质：分辨率/窗口模式/渲染器（游戏根目录）
+    'Resources/Renderers.ini', // 画质：渲染器列表
+    'KeyboardMD.ini', // 快捷键（用户改键覆盖项，游戏只读这个；KeyboardCommands.ini 是游戏自带定义，不用管）
+    'RA2MO.ini' // 音量/游戏设置（settingsFile）
+  ],
+  'zero-hour': [] // ZH 画质/设置走游戏自己的 Options.ini（包内，不加全局覆盖）
+}
+
+function getGlobalSettingsRel(gameId: string): string[] {
+  return GLOBAL_SETTINGS_REL_BY_GAME[gameId] ?? []
+}
 
 function normalizeRel(rel: string): string {
   return rel.replace(/\\/g, '/')
@@ -303,6 +311,7 @@ function linkOriginal(
   dstRoot: string,
   saveRoot: string,
   stats: LinkStats,
+  globalSettingsRel: Set<string>,
   onFile?: () => void
 ): void {
   fs.mkdirSync(dstRoot, { recursive: true })
@@ -315,12 +324,12 @@ function linkOriginal(
         if (WRITABLE_DIRS.has(entry.name)) {
           ensureWritableJunction(srcPath, dstPath, path.join(saveRoot, rel))
         } else {
-          linkOriginal(srcPath, dstPath, saveRoot, stats, onFile)
+          linkOriginal(srcPath, dstPath, saveRoot, stats, globalSettingsRel, onFile)
         }
       } else if (entry.isFile()) {
         // 全局设置文件（画质/快捷键/音量）不走 per-modset：基链接直接硬链接安装源，
         // 之后由 linkGlobalSettings 用 settings/ 覆盖（启动器设置优先）
-        if (isConfigFile(entry.name) && !GLOBAL_SETTINGS_REL.has(normalizeRel(rel))) {
+        if (isConfigFile(entry.name) && !globalSettingsRel.has(normalizeRel(rel))) {
           linkConfigFile(srcPath, dstPath, path.join(saveRoot, 'config', rel), stats)
         } else {
           hardlinkOrSkip(srcPath, dstPath, stats)
@@ -356,7 +365,7 @@ function linkGlobalSettings(
   stats: LinkStats
 ): void {
   const settingsRoot = path.join(resourceDir, gameId, 'settings')
-  for (const rel of GLOBAL_SETTINGS_REL) {
+  for (const rel of getGlobalSettingsRel(gameId)) {
     const globalSrc = path.join(settingsRoot, rel)
     if (!fs.existsSync(globalSrc)) {
       fs.mkdirSync(path.dirname(globalSrc), { recursive: true })
@@ -399,6 +408,24 @@ function linkMod(modDir: string, playground: string, stats: LinkStats): void {
   walk(modDir, playground)
 }
 
+/**
+ * 本体包名：modsets.json 里 "vanilla"（默认）播放集的第一个包。
+ * MO=MentalOmega、ZH=ZeroHour；它就是安装目录拷贝过来的完整游戏。
+ */
+async function getBasePackageName(resourceDir: string, gameId: string): Promise<string> {
+  try {
+    const modSetsPath = path.join(resourceDir, gameId, 'modsets.json')
+    const data = JSON.parse(await readFile(modSetsPath, 'utf-8')) as Array<{
+      id: string
+      packages?: Array<{ id: string; name: string }>
+    }>
+    const base = data.find((m) => m.id === 'vanilla') ?? data[0]
+    return base?.packages?.[0]?.name ?? ''
+  } catch {
+    return ''
+  }
+}
+
 /** 从 modsets.json 读当前播放集的包名列表（兼容旧 mods 字段） */
 async function getPlaySetPackageNames(resourceDir: string, gameId: string, modSetId: string): Promise<string[]> {
   try {
@@ -426,7 +453,9 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     if (!resourceDir) return { ok: false, error: '请先在设置中选择资源目录' }
 
     const playground = path.join(resourceDir, gameId, 'playground')
-    const saveRoot = path.join(resourceDir, gameId, 'saves', modSetId)
+    // modSetId 可能含 `:`（如 zh-package:Contra），Windows 路径非法 → 替换
+    const saveDir = modSetId.replace(/[\\/:*?"<>|]/g, '_')
+    const saveRoot = path.join(resourceDir, gameId, 'saves', saveDir)
     const stats: LinkStats = { failed: 0, errors: [] }
 
     // 1. 清空
@@ -435,15 +464,19 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     fs.mkdirSync(playground, { recursive: true })
     onProgress?.(8, '工作区已清理')
 
-    // 2. 游戏本体包作基准（MentalOmega 是安装目录的完整静态副本；可写目录不含）
-    const basePkgDir = path.join(resourceDir, gameId, 'packages', 'MentalOmega')
+    // 2. 游戏本体包作基准（MO=MentalOmega / ZH=ZeroHour，取自 modsets.json vanilla 播放集）
+    const basePkgName = await getBasePackageName(resourceDir, gameId)
+    if (!basePkgName) {
+      return { ok: false, error: '找不到游戏本体包（modsets.json 里 vanilla 播放集缺失）' }
+    }
+    const basePkgDir = path.join(resourceDir, gameId, 'packages', basePkgName)
     if (!fs.existsSync(basePkgDir)) {
-      return { ok: false, error: '找不到游戏本体包 MentalOmega，请先在包管理中导入' }
+      return { ok: false, error: `找不到游戏本体包 ${basePkgName}，请先在包管理中导入` }
     }
     const total = countFiles(basePkgDir)
     let done = 0
     onProgress?.(10, '链接游戏本体包...')
-    linkOriginal(basePkgDir, playground, saveRoot, stats, () => {
+    linkOriginal(basePkgDir, playground, saveRoot, stats, new Set(getGlobalSettingsRel(gameId)), () => {
       done++
       if (total > 0 && (done % 300 === 0 || done === total)) {
         const pct = 10 + Math.round((done / total) * 60)
@@ -451,15 +484,29 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
       }
     })
 
-    // 3. 其余包覆盖（按播放集顺序，后覆盖胜出；MentalOmega 再次链接是幂等跳过）
+    // 3. 其余包覆盖（按播放集顺序，后覆盖胜出；本体包再次链接是幂等跳过）
     //    可写目录已在 linkOriginal 里按「本体包真实存在的目录」junction，不硬造其它游戏的可写目录
     const packageNames = await getPlaySetPackageNames(resourceDir, gameId, modSetId)
+    const foreignBasePackage = gameId === 'mental-omega' ? 'ZeroHour' : 'MentalOmega'
     if (packageNames.length > 0) {
       onProgress?.(72, '链接包文件...')
       for (const packageName of packageNames) {
+        if (packageName === basePkgName || packageName === foreignBasePackage) continue
         const pkgDir = path.join(resourceDir, gameId, 'packages', packageName)
         if (!fs.existsSync(pkgDir)) continue
         linkMod(pkgDir, playground, stats)
+        if (gameId === 'zero-hour') {
+          const siblingNames = fs.readdirSync(path.join(resourceDir, gameId, 'packages'), { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && (
+              entry.name.startsWith(`${packageName}_patch_`) ||
+              entry.name.startsWith(`${packageName}_addon_`)
+            ))
+            .map((entry) => entry.name)
+            .sort((a, b) => a.localeCompare(b))
+          for (const siblingName of siblingNames) {
+            linkMod(path.join(resourceDir, gameId, 'packages', siblingName), playground, stats)
+          }
+        }
       }
       onProgress?.(96, '包文件已链接')
     }

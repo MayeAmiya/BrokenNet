@@ -485,10 +485,17 @@ export function registerModHandlers(): void {
   })
 
   // 下载 MOD
-  ipcMain.handle('mod:download', async (e, url: string, gameId: string, modName: string) => {
+  ipcMain.handle('mod:download', async (e, url: string, gameId: string, modName: string, overwrite = false) => {
     const modsDir = await getPackagesDir(gameId)
     const modDir = join(modsDir, modName)
     const tempDir = join(modsDir, `${modName}.downloading`)
+
+    try {
+      const installed = await stat(modDir)
+      if (installed.isDirectory() && !overwrite) {
+        return { ok: false, alreadyInstalled: true, path: modDir, error: 'MOD 已安装' }
+      }
+    } catch { /* 未安装 */ }
 
     const urlPath = url.split('?')[0].toLowerCase()
     const isArchive = urlPath.endsWith('.rar') || urlPath.endsWith('.zip') || urlPath.endsWith('.7z')

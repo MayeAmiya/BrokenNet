@@ -96,11 +96,12 @@ const api = {
       manifest?: Record<string, unknown>
       error?: string
     }> => ipcRenderer.invoke('mod:fetch-manifest', url),
-    download: (url: string, gameId: string, modName: string): Promise<{
+    download: (url: string, gameId: string, modName: string, overwrite = false): Promise<{
       ok: boolean
       path?: string
+      alreadyInstalled?: boolean
       error?: string
-    }> => ipcRenderer.invoke('mod:download', url, gameId, modName),
+    }> => ipcRenderer.invoke('mod:download', url, gameId, modName, overwrite),
     pauseDownload: (modName: string): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('mod:pause-download', modName),
     cancelDownload: (modName: string): Promise<{ ok: boolean }> =>
@@ -179,6 +180,8 @@ const api = {
       exe: string
       spawnOptions: Record<string, unknown>
       args?: string[]
+      /** ZH 视角高度：>0 时启动前原地改写 GameData.ini 所在 .big（playground 硬链接的） */
+      cameraHeight?: number
     }): Promise<{ ok: boolean; error?: string; pid?: number }> =>
       ipcRenderer.invoke('game:launch', opts),
     isRunning: (): Promise<boolean> =>
@@ -734,6 +737,13 @@ const api = {
         missions: CampaignMissionPayload[]
       }>
     }> => ipcRenderer.invoke('campaign:load', gamePath)
+  },
+  zhSinglePlayer: {
+    load: (gamePath: string, includeCampaigns: boolean): Promise<{
+      campaigns: Array<{ id: string; label: string; firstMission: string; playerFaction: string; challenge: boolean; missions: Array<{ id: string; map: string; nextMission: string; location: string; generalName: string }> }>
+      challengeCampaigns: Array<{ id: string; label: string; firstMission: string; playerFaction: string; challenge: boolean; missions: Array<{ id: string; map: string; nextMission: string; location: string; generalName: string }> }>
+      generals: Array<{ index: number; enabled: boolean; name: string; rank: string; branch: string; strategy: string; campaign: string; playerTemplate: string }>
+    }> => ipcRenderer.invoke('zh-singleplayer:load', gamePath, includeCampaigns)
   },
   translation: {
     load: (filePath: string): Promise<{ name: string; culture: string; entries: Record<string, string> } | null> =>
