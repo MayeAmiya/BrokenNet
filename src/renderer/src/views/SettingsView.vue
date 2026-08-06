@@ -202,7 +202,7 @@ function onScaleChange(): void {
         <div>
           <a href="https://github.com/MayeAmiya" target="_blank" class="text-fg hover:text-accent">MayeAmiya</a>
           <p class="mt-0.5">
-            项目地址：<a href="https://github.com/MayeAmiya/BrokenNet" target="_blank" class="text-fg hover:text-accent">BrokenNet</a>　欢迎提 issue 和 PR
+            项目地址：<a href="https://github.com/MayeAmiya/BrokenNet" target="_blank" class="text-fg hover:text-accent">BrokenNet</a>　下载器：aria2c　解压器：7-Zip　欢迎提 issue 和 PR
           </p>
           <p class="mt-1 text-[11px]">
             RA2 系联机基于

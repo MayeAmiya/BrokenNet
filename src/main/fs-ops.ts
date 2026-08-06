@@ -1,7 +1,56 @@
 import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
-import { link, unlink, stat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { link, unlink, stat, mkdir, readFile, readdir, writeFile, access } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { app } from 'electron'
+import { app, clipboard } from 'electron'
+import { existsSync } from 'node:fs'
+
+function getDefaultResourceBase(): string {
+  for (let code = 'Z'.charCodeAt(0); code >= 'C'.charCodeAt(0); code--) {
+    const root = `${String.fromCharCode(code)}:\\`
+    if (existsSync(root)) return root
+  }
+  return app.getPath('documents')
+}
+
+async function discoverGamePaths(gameId: string): Promise<string[]> {
+  const roots = [process.env['PROGRAMFILES'], process.env['PROGRAMFILES(X86)'], process.env['LOCALAPPDATA'], process.env['USERPROFILE']].filter(Boolean) as string[]
+  const candidates = new Set<string>()
+  const names = gameId === 'mental-omega'
+    ? ['MentalOmega', 'Mental Omega']
+    : ['Command and Conquer Generals Zero Hour', 'Command & Conquer Generals Zero Hour', 'Zero Hour']
+  for (const root of roots) for (const name of names) candidates.add(join(root, name))
+  for (const drive of ['C:', 'D:', 'E:', 'F:', 'G:']) {
+    for (const name of names) candidates.add(join(drive + '\\', 'Program Files (x86)', 'Steam', 'steamapps', 'common', name))
+    for (const name of names) candidates.add(join(drive + '\\', 'Program Files', 'Steam', 'steamapps', 'common', name))
+  }
+  const result: string[] = []
+  for (const candidate of candidates) {
+    try { await access(candidate); result.push(candidate) } catch { /* not installed */ }
+  }
+  // 对常见安装根目录做有限深度扫描，以覆盖 Steam 自定义库和改名目录。
+  const markers = gameId === 'mental-omega' ? ['MentalOmegaClient.exe'] : ['Generals.exe', 'WindowZH.big']
+  const scanRoots = [...roots, ...['C:', 'D:', 'E:', 'F:', 'G:'].map((d) => `${d}\\`)]
+  const queue = scanRoots.map((path) => ({ path, depth: 0 }))
+  const visited = new Set<string>()
+  while (queue.length) {
+    const current = queue.shift()!
+    if (current.depth > 5 || visited.has(current.path)) continue
+    visited.add(current.path)
+    let entries: import('node:fs').Dirent[]
+    try { entries = await readdir(current.path, { withFileTypes: true }) } catch { continue }
+    const namesInDir = new Set(entries.map((entry) => entry.name.toLowerCase()))
+    if (markers.some((marker) => namesInDir.has(marker.toLowerCase())) || namesInDir.has('mental omega')) {
+      result.push(current.path)
+      continue
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && !entry.name.startsWith('.') && !['Windows', 'System32', 'node_modules'].includes(entry.name)) {
+        queue.push({ path: join(current.path, entry.name), depth: current.depth + 1 })
+      }
+    }
+  }
+  return [...new Set(result)]
+}
 
 export interface LinkResult {
   ok: boolean
@@ -61,6 +110,10 @@ export function registerFsHandlers(): void {
   ipcMain.handle('fs:list-maps', (_e, gameId: string) => listDirFiles(gameId, 'maps'))
   ipcMain.handle('fs:list-replays', (_e, gameId: string) => listDirFiles(gameId, 'replay'))
   ipcMain.handle('fs:select-directory', (e) => selectDirectory(e.sender))
+  ipcMain.handle('fs:get-default-resource-base', () => getDefaultResourceBase())
+  ipcMain.handle('clipboard:write-text', (_e, value: string) => { clipboard.writeText(value) })
+  ipcMain.handle('clipboard:read-text', () => clipboard.readText())
+  ipcMain.handle('fs:discover-game-paths', (_e, gameId: string) => discoverGamePaths(gameId))
   // 首启引导：在用户选择的基目录下创建 BrokenNetLib 并设为资源库。
   // 若 BrokenNetLib 已存在则直接复用（不覆写库内已有内容），返回 reused 标记
   ipcMain.handle('fs:init-resource-dir', async (_e, basePath: string) => {

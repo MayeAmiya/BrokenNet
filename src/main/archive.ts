@@ -25,6 +25,18 @@ export async function find7zExe(): Promise<string> {
   throw new Error('未找到 7z.exe，请安装 7-Zip：https://7-zip.org')
 }
 
+/** 用 7-Zip 探测实际文件格式，不依赖 URL 或文件扩展名。 */
+export async function isExtractableArchive(archivePath: string): Promise<boolean> {
+  try {
+    await stat(archivePath)
+    const binPath = await find7zExe()
+    await execFileAsync(binPath, ['l', '-slt', archivePath])
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** 解压 RAR/ZIP/7Z 文件（统一用 7z.exe） */
 export async function extractArchive(archivePath: string, destDir: string): Promise<void> {
   await mkdir(destDir, { recursive: true })

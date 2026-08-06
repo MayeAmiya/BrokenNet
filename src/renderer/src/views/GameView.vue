@@ -36,13 +36,14 @@ const {
 } = useGameConfig()
 
 // 游戏设置
-const useGtd = ref(props.profile.useGtd ?? false)
+const useGtd = ref(false)
 const gtdPath = ref(props.profile.gtdPath ?? '')
-const useGenTool = ref(props.profile.useGenTool ?? false)
+const useGenTool = ref(props.profile.useGenTool ?? true)
 
 // 启用 GeneralsTD 时，GenTool 无效
 watch(useGtd, (val) => {
   if (val) useGenTool.value = false
+  if (!val && (activeTab.value === 'campaign' || activeTab.value === 'multiplayer')) activeTab.value = 'modsets'
   void saveSettings()
 })
 
@@ -66,8 +67,8 @@ const isMentalOmega = computed(() => props.profile.id === 'mental-omega')
 const tabs = computed(() => {
   const allTabs = [
     { id: 'modsets', label: '播放集管理', disabled: !samePartition.value },
-    { id: 'campaign', label: isMentalOmega.value ? '单人战役' : '单人模式' },
-    { id: 'multiplayer', label: '多人联机', disabled: !isMentalOmega.value, tip: !isMentalOmega.value ? '绝命时刻联机暂未支持（ZH 走独立联机逻辑，不复用 MO 的 CnCNet 路径）' : undefined },
+    { id: 'campaign', label: isMentalOmega.value ? '单人战役' : '单人模式', disabled: !useGtd.value, tip: !useGtd.value ? '单人模式仅 GeneralsTD 启动支持' : undefined },
+    { id: 'multiplayer', label: '多人联机', disabled: !useGtd.value, tip: !useGtd.value ? '多人联机仅 GeneralsTD 启动支持' : undefined },
     { id: 'replays', label: '统计', disabled: !samePartition.value },
     { id: 'mods', label: '包管理' },
     { id: 'maps', label: '地图管理' },
@@ -144,7 +145,192 @@ const subDownloadsByMod = computed<Map<string, SubDownloadItem[]>>(() => {
 })
 
 // 已安装的 MOD
-const installedMods = ref<Array<{ name: string; path: string }>>([])
+interface ModdbPackageSource {
+  provider: string
+  mod: string
+  slug: string
+  kind?: 'addon' | 'download'
+  fileId?: string
+  page?: string
+}
+
+interface ModdbInstallItem {
+  mod: string
+  slug: string
+  kind: 'addon' | 'download'
+}
+
+const installedMods = ref<Array<{ name: string; path: string; source?: ModdbPackageSource }>>([])
+const installedModNames = ref<string[]>([])
+const installedModPackageNames = ref<string[]>([])
+const zhPackageView = ref<'mods' | 'packages'>('mods')
+const moddbPackageCommand = ref('')
+const installingModdbPackage = ref(false)
+const moddbDownloads = ref<Array<{ slug: string; status: string; progress: number }>>([])
+const pendingInstallCommand = ref<any | null>(null)
+const commandInstalling = ref(false)
+const commandProgress = ref<Record<string, { status: string; progress: number; downloaded?: number; total?: number }>>({})
+const localPackageNames = computed(() => new Set(installedMods.value.map((pkg) => pkg.name)))
+
+async function installModdbPackageCommand(): Promise<void> {
+  const match = moddbPackageCommand.value.trim().match(/^https?:\/\/www\.moddb\.com\/mods\/([^/]+)\/(addons|downloads)\/([a-z0-9][a-z0-9_-]{1,120})\/?$/i)
+  if (!match) return toastError('请输入有效的 ModDB addon 页面网址')
+  installingModdbPackage.value = true
+  try {
+    const result = await window.api.package.installModdbAddon(props.profile.id, match[1], match[3], match[2].toLowerCase() === 'downloads' ? 'download' : 'addon')
+    if (!result.ok) return toastError(result.error ?? 'ModDB addon 下载失败')
+    moddbPackageCommand.value = ''
+    await loadInstalledMods()
+    toastSuccess(`已安装 ModDB package「${match[3]}」`)
+  } finally { installingModdbPackage.value = false }
+}
+const playsetCommandInput = ref<HTMLInputElement | null>(null)
+
+async function exportPlaysetCommand(playset?: ModSet): Promise<void> {
+  const set = playset ?? modSets.value.find((item) => item.id === selectedModSetId.value)
+  if (!set) return toastError('请先选择一个播放集')
+  if (set.packages.some((pkg) => localPackageNames.value.has(pkg.name) && pkg.name !== 'ZeroHour' && !installedMods.value.find((item) => item.name === pkg.name)?.source)) {
+    return toastError('包含本地 package，当前无法导出安装指令')
+  }
+  const modPackages = set.packages.filter((pkg) => pkg.name !== 'ZeroHour' && installedModNames.value.includes(pkg.name) && !installedMods.value.find((item) => item.name === pkg.name)?.source)
+  const mods = modPackages.map((pkg) => {
+    const installed = installedModNames.value.filter((name) => name.startsWith(`${pkg.name}_`))
+    const patches = installed.filter((name) => name.includes('_patch_')).map((name) => Number(name.split('_patch_')[1])).filter(Number.isInteger)
+    const addons = installed.filter((name) => name.includes('_addon_')).map((name) => Number(name.split('_addon_')[1])).filter(Number.isInteger)
+    return {
+      id: pkg.name,
+      patches,
+      addons
+    }
+  })
+  const command = { format: 'brokennet-playset', version: 3, gameId: props.profile.id, name: set.name, description: set.description, mods, packages: set.packages }
+  const sourceCommands = set.packages
+    .map((pkg) => installedMods.value.find((item) => item.name === pkg.name)?.source)
+    .filter((source) => source?.provider === 'moddb')
+    .map((source) => `Moddb:${source!.mod}:${source!.kind === 'download' ? 'Download' : 'Addon'}:${source!.slug}`)
+  const text = [...sourceCommands, `BN1 ${JSON.stringify(command)}`].join('\n')
+  void window.api.clipboard.writeText(text).then(() => toastSuccess('安装命令已复制到剪贴板'))
+}
+
+async function importPlaysetCommandFromClipboard(): Promise<void> {
+  const text = await window.api.clipboard.readText()
+  const moddbPackageIds = new Set<string>()
+  const moddbPackages: ModdbInstallItem[] = []
+  const normalizeCommandId = (value: string) => value.trim().toLowerCase().replace(/patch(\d+)/g, 'p$1').replace(/[^a-z0-9]/g, '')
+  for (const line of text.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
+    const moddb = line.match(/^Moddb:([^:]+):(Addon|Download):([a-z0-9][a-z0-9_-]{1,120})$/i) ?? line.match(/^https?:\/\/www\.moddb\.com\/mods\/([^/]+)\/(addons|downloads)\/([a-z0-9][a-z0-9_-]{1,120})\/?$/i)
+    if (!moddb) continue
+    moddbPackageIds.add(normalizeCommandId(moddb[3]))
+    const kind = (moddb[2].toLowerCase() === 'download' || moddb[2].toLowerCase() === 'downloads') ? 'download' : 'addon'
+    if (!moddbPackages.some((item) => normalizeCommandId(item.slug) === normalizeCommandId(moddb[3]))) {
+      moddbPackages.push({ mod: moddb[1], slug: moddb[3], kind })
+    }
+  }
+  const payload = text.split(/\r?\n/).map((item) => item.trim()).find((item) => item.startsWith('BN1 '))?.slice(4) ?? text.trim()
+  try {
+    const command = JSON.parse(payload)
+    if (command.format === 'brokennet-playset') {
+      if (Array.isArray(command.mods)) command.mods = command.mods.filter((mod: { id?: string }) => !mod.id || !moddbPackageIds.has(normalizeCommandId(mod.id)))
+      if (!Array.isArray(command.packages)) command.packages = []
+      for (const item of moddbPackages) {
+        if (!command.packages.some((pkg: { name?: string }) => pkg.name && normalizeCommandId(pkg.name) === normalizeCommandId(item.slug))) {
+          command.packages.push({ id: item.slug, name: item.slug })
+        }
+      }
+      command.moddbPackages = moddbPackages
+      commandProgress.value = {}
+      pendingInstallCommand.value = command
+      return
+    }
+    throw new Error('剪贴板中没有有效的 BN1 安装命令')
+  } catch { toastError('剪贴板中没有有效的安装命令') }
+}
+
+async function confirmInstallCommand(): Promise<void> {
+  if (!pendingInstallCommand.value || commandInstalling.value) return
+  commandInstalling.value = true
+  try {
+    for (const item of (pendingInstallCommand.value.moddbPackages ?? []) as ModdbInstallItem[]) {
+      commandProgress.value = {
+        ...commandProgress.value,
+        [item.slug]: commandProgress.value[item.slug] ?? { status: 'preparing', progress: 0 }
+      }
+      const result = await window.api.package.installModdbAddon(props.profile.id, item.mod, item.slug, item.kind)
+      if (!result.ok) throw new Error(result.error ?? `ModDB package ${item.slug} 下载失败`)
+      commandProgress.value = {
+        ...commandProgress.value,
+        [item.slug]: { ...commandProgress.value[item.slug], status: 'done', progress: 100 }
+      }
+    }
+    await loadInstalledMods()
+    await importPlaysetCommand({ target: { files: [new File([JSON.stringify(pendingInstallCommand.value)], 'clipboard.json')] } } as unknown as Event)
+    pendingInstallCommand.value = null
+  } catch (error) {
+    toastError((error as Error).message || '安装命令执行失败')
+  } finally { commandInstalling.value = false }
+}
+
+async function importPlaysetCommand(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    await readInstalledMods()
+    const command = JSON.parse(await file.text()) as { format?: string; version?: number; gameId?: string; name?: string; description?: string; packages?: ModItem[]; mods?: Array<{ id: string; patches?: number[]; addons?: number[] }> }
+    if (command.format !== 'brokennet-playset' || ![1, 2, 3].includes(command.version ?? 0) || command.gameId !== props.profile.id || !command.name || !Array.isArray(command.packages)) throw new Error('不是当前游戏的有效播放集指令')
+    if (command.version === 3 && command.mods?.length) {
+      const repoResult = repoMods.value.length ? { ok: true, data: { modDatas: repoMods.value } } : await window.api.mod.fetchRepoMods('zh')
+      if (!repoResult.ok || !repoResult.data) throw new Error(('error' in repoResult ? repoResult.error : undefined) ?? '无法获取 ZH MOD 仓库')
+      for (const requested of command.mods) {
+        const normalizeModId = (value: string) => value.trim().toLowerCase().replace(/patch(\d+)/g, 'p$1').replace(/[^a-z0-9]/g, '')
+        const requestedId = normalizeModId(requested.id)
+        const repo = repoResult.data.modDatas.find((item) => normalizeModId(item.ModName) === requestedId)
+        if (!repo) {
+          if (installedMods.value.some((pkg) => normalizeModId(pkg.name) === requestedId)) continue
+          throw new Error(`仓库中找不到 MOD：${requested.id}（当前清单共 ${repoResult.data.modDatas.length} 项）`)
+        }
+        const manifestResult = await window.api.mod.fetchManifest(repo.ModLink)
+        const manifest = manifestResult.manifest as Record<string, unknown> | undefined
+        const mainUrl = typeof manifest?.SimpleDownloadLink === 'string'
+          ? manifest.SimpleDownloadLink
+          : Array.isArray(manifest?.SimpleDownloadLink) ? String(manifest.SimpleDownloadLink[0] ?? '') : undefined
+        if (!mainUrl) throw new Error(`无法解析 ${requested.id} 的主 MOD 下载地址`)
+        if (!installedModNames.value.includes(requested.id)) {
+          const downloaded = await window.api.mod.download(mainUrl, props.profile.id, requested.id)
+          if (!downloaded.ok && !downloaded.alreadyInstalled) throw new Error(downloaded.error ?? `${requested.id} 下载失败`)
+        }
+        for (const index of [...(requested.patches ?? []).map((i) => ({ index: i, url: repo.ModPatches[i], prefix: 'patch' })), ...(requested.addons ?? []).map((i) => ({ index: i, url: repo.ModAddons[i], prefix: 'addon' }))]) {
+          if (!index.url) throw new Error(`${requested.id} 的 ${index.prefix} 索引 ${index.index} 不存在`)
+          const childName = `${requested.id}_${index.prefix}_${index.index}`
+          if (installedModNames.value.includes(childName)) continue
+          const childManifestResult = await window.api.mod.fetchManifest(index.url)
+          const childManifest = childManifestResult.manifest as Record<string, unknown> | undefined
+          const childDownloadUrl = typeof childManifest?.SimpleDownloadLink === 'string'
+            ? childManifest.SimpleDownloadLink
+            : Array.isArray(childManifest?.SimpleDownloadLink) ? String(childManifest.SimpleDownloadLink[0] ?? '') : undefined
+          if (!childDownloadUrl) throw new Error(`无法解析 ${childName} 的下载地址`)
+          const downloaded = await window.api.mod.download(childDownloadUrl, props.profile.id, childName)
+          if (!downloaded.ok && !downloaded.alreadyInstalled) throw new Error(downloaded.error ?? `${childName} 下载失败`)
+        }
+        await readInstalledMods()
+      }
+    }
+    const normalizePackageId = (value: string) => value.trim().toLowerCase().replace(/patch(\d+)/g, 'p$1').replace(/[^a-z0-9]/g, '')
+    const importedPackages = command.packages.map((pkg) => {
+      if (pkg.name === 'ZeroHour' || command.mods?.some((mod) => normalizePackageId(mod.id) === normalizePackageId(pkg.name))) return { id: pkg.id, name: pkg.name }
+      const installed = installedMods.value.find((item) => normalizePackageId(item.name) === normalizePackageId(pkg.name))
+      return installed ? { id: installed.name, name: installed.name } : { id: pkg.id, name: pkg.name }
+    })
+    const imported: ModSet = { id: `imported:${Date.now()}`, name: command.name, description: command.description ?? '导入的播放集', packages: importedPackages }
+    modSets.value = [...modSets.value, imported]
+    selectedModSetId.value = imported.id
+    await saveModSetsToDisk()
+    toastSuccess(`已导入播放集「${imported.name}」`)
+  } catch (error) {
+    toastError((error as Error).message || '播放集指令导入失败')
+  }
+}
 
 // 加载仓库 MOD 列表
 async function loadRepoMods(): Promise<void> {
@@ -175,7 +361,7 @@ async function selectRepoMod(mod: RepoMod): Promise<void> {
   manifestLoading.value = true
 
   // 根据磁盘上已安装的 patch/addon 初始化勾选状态
-  const installed = (name: string) => installedMods.value.some(m => m.name === name)
+  const installed = (name: string) => installedModNames.value.includes(name)
   for (let i = 0; i < mod.ModPatches.length; i++) {
     if (installed(`${mod.ModName}_patch_${i}`)) selectedPatches.value.add(i)
   }
@@ -279,7 +465,7 @@ function checkNeedUpdate(): void {
 // 判断当前 MOD 是否已安装
 const isModInstalled = computed(() => {
   if (!selectedRepoMod.value) return false
-  return installedMods.value.some(m => m.name === selectedRepoMod.value!.ModName)
+  return installedModNames.value.includes(selectedRepoMod.value!.ModName)
 })
 
 // 判断当前 MOD 是否正在下载
@@ -291,7 +477,7 @@ const isDownloading = computed(() => {
 // 下载 MOD（首次安装）
 async function downloadMod(mod: RepoMod): Promise<void> {
   await readInstalledMods()
-  if (installedMods.value.some((installed) => installed.name === mod.ModName)) {
+  if (installedModNames.value.includes(mod.ModName)) {
     downloadProgress.value.delete(mod.ModName)
     toastSuccess(`「${mod.ModName}」已经安装`)
     return
@@ -301,12 +487,14 @@ async function downloadMod(mod: RepoMod): Promise<void> {
   const manifestResult = await window.api.mod.fetchManifest(mod.ModLink)
   if (!manifestResult.ok || !manifestResult.manifest) {
     downloadProgress.value.set(mod.ModName, { status: 'error', progress: 0 })
+    toastError(manifestResult.error ?? `无法获取「${mod.ModName}」的 manifest`)
     return
   }
   const manifest = manifestResult.manifest as Record<string, unknown>
   const downloadUrl = manifest.SimpleDownloadLink as string
   if (!downloadUrl) {
     downloadProgress.value.set(mod.ModName, { status: 'error', progress: 0 })
+    toastError(`「${mod.ModName}」manifest 中没有有效下载地址`)
     return
   }
 
@@ -374,8 +562,7 @@ async function modifyMod(mod: RepoMod): Promise<void> {
 
 // 并行下载选中的 patches 和 addons（跳过已安装的），聚合进度到主 mod
 async function downloadPatchesAndAddons(mod: RepoMod): Promise<void> {
-  const isInstalled = (name: string) =>
-    installedMods.value.some(m => m.name === name)
+  const isInstalled = (name: string) => installedModNames.value.includes(name)
 
   // 收集需要下载的任务
   const downloadTasks: Array<{ name: string; url: string }> = []
@@ -467,6 +654,9 @@ async function readInstalledMods(): Promise<void> {
   if (result.ok) {
     installedMods.value = result.packages
   }
+  const modResult = await window.api.mod.listInstalled(props.profile.id)
+  if (modResult.ok) installedModNames.value = [...new Set([...modResult.mods, ...modResult.packages])]
+  installedModPackageNames.value = installedMods.value.map((pkg) => pkg.name)
 }
 
 async function loadInstalledMods(): Promise<void> {
@@ -575,6 +765,9 @@ const removeGlobalListener = window.api.mod.onDownloadProgress((data) => {
     status: data.status,
     progress: data.progress
   })
+  const previous = commandProgress.value[data.modName]
+  const nextProgress = data.status === 'done' ? 100 : Math.max(previous?.progress ?? 0, data.progress ?? 0)
+  commandProgress.value = { ...commandProgress.value, [data.modName]: { status: data.status, progress: nextProgress, downloaded: Math.max(previous?.downloaded ?? 0, data.downloaded ?? 0), total: Math.max(previous?.total ?? 0, data.total ?? 0) } }
 })
 
 onUnmounted(() => {
@@ -609,12 +802,17 @@ async function loadModSets(): Promise<void> {
   }
 }
 
-async function saveModSetsToDisk(): Promise<void> {
+async function saveModSetsToDisk(): Promise<boolean> {
   // 关键：Vue 的 ref/reactive 值是 Proxy，Electron IPC 无法 structured-clone（"An object could not be cloned"）。
   // 必须深克隆成普通对象再传。
   const plain = JSON.parse(JSON.stringify(modSets.value))
   const r = await window.api.modset.save(props.profile.id, plain)
   console.log('[saveModSetsToDisk]', props.profile.id, plain.length, '个播放集:', plain.map((s: any) => s.id), '->', r)
+  if (!r.ok) {
+    toastError(r.error ?? '播放集保存失败')
+    return false
+  }
+  return true
 }
 
 // 已安装的主 MOD（用于播放集右侧列表，排除 patch/addon 子项）
@@ -646,6 +844,22 @@ function handleDropdownClickOutside(e: MouseEvent): void {
 }
 
 onMounted(async () => {
+  const stopModdbProgress = window.api.package.onModdbProgress((data) => {
+    const existing = moddbDownloads.value.find((item) => item.slug === data.slug)
+    if (existing) { existing.status = data.status; existing.progress = data.progress }
+    else moddbDownloads.value.push({ slug: data.slug, status: data.status, progress: data.progress })
+    const previous = commandProgress.value[data.slug]
+    commandProgress.value = {
+      ...commandProgress.value,
+      [data.slug]: {
+        status: data.status,
+        progress: data.status === 'done' ? 100 : Math.max(previous?.progress ?? 0, data.progress ?? 0),
+        downloaded: Math.max(previous?.downloaded ?? 0, data.received ?? 0),
+        total: Math.max(previous?.total ?? 0, data.total ?? 0)
+      }
+    }
+  })
+  onUnmounted(stopModdbProgress)
   document.addEventListener('click', handleDropdownClickOutside)
   resourceDir.value = (await window.api.fs.getConfig('resourceDir')) ?? ''
   // 确保默认"原版"播放集存在（游戏本体视为包），再加载播放集
@@ -828,13 +1042,13 @@ function startEdit(mod: ModSet): void {
   editingModSet.value = { ...mod, packages: [...mod.packages] }
 }
 
-function saveEdit(): void {
+async function saveEdit(): Promise<void> {
   if (!editingModSet.value || !editingModSetId.value) return
   const i = modSets.value.findIndex((m) => m.id === editingModSetId.value)
   if (i >= 0) modSets.value[i] = { ...editingModSet.value }
   editingModSetId.value = null
   editingModSet.value = null
-  saveModSetsToDisk()
+  await saveModSetsToDisk()
 }
 
 function cancelEdit(): void {
@@ -842,14 +1056,13 @@ function cancelEdit(): void {
   editingModSet.value = null
 }
 
-function deleteModSet(id: string): void {
-  if (id === 'vanilla') return // 原版不可删除
+async function deleteModSet(id: string): Promise<void> {
   modSets.value = modSets.value.filter((m) => m.id !== id)
   if (selectedModSetId.value === id) {
     selectedModSetId.value = 'vanilla'
     localStorage.setItem(modSetStorageKey.value, 'vanilla')
   }
-  saveModSetsToDisk()
+  await saveModSetsToDisk()
 }
 
 // 删除确认
@@ -866,8 +1079,8 @@ function cancelDelete(): void {
   pendingDeleteId.value = ''
 }
 
-function executeDelete(): void {
-  deleteModSet(pendingDeleteId.value)
+async function executeDelete(): Promise<void> {
+  await deleteModSet(pendingDeleteId.value)
   showDeleteConfirm.value = false
   pendingDeleteId.value = ''
 }
@@ -876,7 +1089,7 @@ function shareModSet(_id: string): void {
   status.value = '分享功能开发中...'
 }
 
-function createModSet(): void {
+async function createModSet(): Promise<void> {
   if (!newModSet.value.name) return
   modSets.value.push({
     id: `mod-${Date.now()}`,
@@ -886,11 +1099,11 @@ function createModSet(): void {
   })
   newModSet.value = { name: '', description: '' }
   showCreateForm.value = false
-  saveModSetsToDisk()
+  await saveModSetsToDisk()
 }
 
 // 复制播放集：深拷贝内容 + 新 id/名称（副本），直接落盘
-function copyModSet(mod: ModSet): void {
+async function copyModSet(mod: ModSet): Promise<void> {
   const base = mod.name.replace(/\s*（副本）\s*$/, '')
   const copy: ModSet = {
     ...mod,
@@ -900,7 +1113,7 @@ function copyModSet(mod: ModSet): void {
   }
   modSets.value.push(copy)
   toastSuccess(`已复制播放集「${mod.name}」`)
-  saveModSetsToDisk()
+  await saveModSetsToDisk()
 }
 
 // 拖拽：从右侧添加 MOD
@@ -1744,6 +1957,13 @@ async function run(key: string): Promise<void> {
               打开 playground 文件夹
             </button>
             <button
+              v-if="!isMentalOmega"
+              class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg"
+              @click="importPlaysetCommandFromClipboard"
+            >
+              粘贴安装命令
+            </button>
+            <button
               v-if="isMentalOmega && !showCreateForm"
               class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi"
               @click="showCreateForm = true"
@@ -1823,14 +2043,19 @@ async function run(key: string): Promise<void> {
               修改
             </button>
             <button
-              v-if="mod.id !== 'vanilla'"
               class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-fg"
               @click="copyModSet(mod)"
             >
               复制
             </button>
             <button
-              v-if="isMentalOmega && mod.id !== 'vanilla'"
+              v-if="!isMentalOmega && !mod.packages.some(pkg => localPackageNames.has(pkg.name) && pkg.name !== 'ZeroHour' && !installedMods.find(item => item.name === pkg.name)?.source)"
+              class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-fg"
+              @click="exportPlaysetCommand(mod)"
+            >
+              复制安装命令
+            </button>
+            <button
               class="border border-line px-3 py-1 text-[12px] text-fg-dim hover:text-red-400"
               @click="confirmDeleteModSet(mod)"
             >
@@ -1881,12 +2106,89 @@ async function run(key: string): Promise<void> {
           </label>
         </div>
 
-        <div v-if="!isMentalOmega" class="flex flex-1 flex-col items-center justify-center px-6 text-center">
-          <p class="text-[13px] text-fg">ZH MOD 作为一个完整 package 使用</p>
-          <p class="mt-2 text-[12px] text-fg-dim">
-            {{ editingModSet.packages.map(p => p.name).join(' → ') }}
-          </p>
-          <p class="mt-1 text-[11px] text-fg-dim">只能修改播放集名称和描述，MOD 内部不能插入、移除或重排其他包。</p>
+        <!-- ZH：两栏包编辑（MOD 作为整体包，不拆分） -->
+        <div v-if="!isMentalOmega" class="flex flex-1 overflow-hidden">
+          <!-- 左侧：播放集中的包（可拖拽排序/移除） -->
+          <div class="flex flex-1 flex-col border-r border-line">
+            <div class="border-b border-line px-4 py-2 text-[12px] text-fg-dim">
+              播放集内容（拖拽排序，拖到右侧删除）
+            </div>
+            <div
+              class="flex-1 overflow-y-auto p-4"
+              :class="dragOverTarget === 'left' && dragOverIndex === (editingModSet?.packages.length ?? 0) ? 'bg-accent/10' : ''"
+              @dragover.prevent
+              @dragenter.prevent="onDragOver('left', editingModSet?.packages.length ?? 0)"
+              @dragleave="onDragLeave()"
+              @drop="onDrop('left', editingModSet?.packages.length ?? 0)"
+            >
+              <div
+                v-for="(mod, i) in editingModSet?.packages"
+                :key="mod.id"
+                class="mb-2 flex cursor-grab items-center gap-3 border bg-panel px-3 py-2 text-[13px] active:cursor-grabbing transition-colors"
+                :class="{
+                  'border-line': dragOverTarget !== 'left' || dragOverIndex !== i,
+                  'border-accent bg-accent/10': dragOverTarget === 'left' && dragOverIndex === i,
+                  'opacity-50': dragSource === 'left' && dragIndex === i
+                }"
+                draggable="true"
+                @dragstart="onDragStart('left', i)"
+                @dragend="onDragEnd"
+                @dragover.prevent
+                @dragenter.prevent="onDragOver('left', i)"
+                @dragleave="onDragLeave()"
+                @drop.stop="onDrop('left', i)"
+              >
+                <span class="text-fg-dim">{{ i + 1 }}.</span>
+                <span class="flex-1">{{ mod.name }}</span>
+                <span
+                  class="cursor-pointer text-fg-dim hover:text-red-400"
+                  @click="removeMod(i)"
+                >
+                  ✕
+                </span>
+              </div>
+              <p v-if="!editingModSet?.packages.length" class="text-center text-[13px] text-fg-dim">
+                拖拽右侧包到此处添加
+              </p>
+            </div>
+          </div>
+
+          <!-- 右侧：已安装的包列表 -->
+          <div class="flex flex-1 flex-col">
+            <div class="border-b border-line px-4 py-2 text-[12px] text-fg-dim">
+              已安装的包（拖到左侧添加）
+            </div>
+            <div
+              class="flex-1 overflow-y-auto p-4"
+              :class="dragOverTarget === 'right' ? 'bg-red-500/10' : ''"
+              @dragover.prevent
+              @dragenter.prevent="onDragOver('right', 0)"
+              @dragleave="onDragLeave()"
+              @drop="onDrop('right', 0)"
+            >
+              <div
+                v-for="(mod, i) in availableMods"
+                :key="mod.id"
+                class="mb-2 flex cursor-grab items-center border border-line bg-panel px-3 py-2 text-[13px] active:cursor-grabbing hover:bg-panel-alt transition-colors"
+                :class="{
+                  'opacity-50': dragSource === 'right' && dragIndex === i,
+                  'bg-red-500/10 border-red-500/30': dragOverTarget === 'right' && dragOverIndex === i
+                }"
+                draggable="true"
+                @dragstart="onDragStart('right', i)"
+                @dragend="onDragEnd"
+                @dragover.prevent
+                @dragenter.prevent="onDragOver('right', i)"
+                @dragleave="onDragLeave()"
+                @click="addMod(mod)"
+              >
+                <span>{{ mod.name }}</span>
+              </div>
+              <p v-if="!availableMods.length" class="text-center text-[13px] text-fg-dim">
+                所有包已添加
+              </p>
+            </div>
+          </div>
         </div>
 
         <!-- MO 两栏包编辑布局 -->
@@ -2048,10 +2350,61 @@ async function run(key: string): Promise<void> {
 
       <!-- 绝命时刻：MOD 管理 -->
       <template v-else>
+      <div v-if="zhPackageView === 'packages'" class="flex flex-1 flex-col overflow-hidden">
+        <div class="flex items-center justify-between border-b border-line px-4 py-3">
+          <div>
+            <div class="flex items-center gap-1">
+              <button class="rounded px-2 py-1 text-[12px] text-fg-dim hover:text-fg" @click="zhPackageView = 'mods'">可用 MOD</button>
+              <button class="rounded bg-accent px-2 py-1 text-[12px] text-white">本地 package</button>
+            </div>
+            <p class="mt-1 text-[11px] text-fg-dim">仅浏览 packages 目录；不会自动创建 MOD 播放集</p>
+          </div>
+          <div class="flex gap-3">
+            <button class="text-[12px] text-fg-dim hover:text-fg" @click="importFolder">添加文件夹</button>
+            <button class="text-[12px] text-fg-dim hover:text-fg" @click="importArchive">添加压缩包</button>
+            <button class="text-[12px] text-fg-dim hover:text-fg" @click="openPackagesFolder">打开目录</button>
+            <button class="text-[12px] text-fg-dim hover:text-fg" @click="loadInstalledMods">刷新</button>
+          </div>
+        </div>
+        <div class="border-b border-line px-4 py-3">
+          <div class="mb-2 text-[12px] text-fg-dim">解析 ModDB 命令并下载 package</div>
+          <div class="flex gap-2">
+            <input v-model="moddbPackageCommand" class="min-w-0 flex-1 border border-line bg-bg px-3 py-1.5 text-[12px] outline-none focus:border-accent" placeholder="https://www.moddb.com/mods/contra/addons/bossaddon1" @keyup.enter="installModdbPackageCommand" />
+            <button class="shrink-0 bg-accent px-3 py-1.5 text-[12px] text-white hover:bg-accent-hi disabled:opacity-50" :disabled="installingModdbPackage" @click="installModdbPackageCommand">{{ installingModdbPackage ? '下载中...' : '解析下载' }}</button>
+          </div>
+          <div v-if="moddbDownloads.length" class="mt-3 space-y-1">
+            <div v-for="item in moddbDownloads" :key="item.slug" class="rounded border border-line bg-panel px-3 py-2 text-[12px]">
+              <div class="flex justify-between"><span>{{ item.slug }}</span><span class="text-fg-dim">{{ item.status === 'done' ? '已完成' : `${item.progress}%` }}</span></div>
+              <div class="mt-1 h-1 bg-bg"><div class="h-1 bg-accent transition-all" :style="{ width: `${item.progress}%` }" /></div>
+            </div>
+          </div>
+        </div>
+        <div class="flex-1 overflow-y-auto p-4">
+          <div v-if="!installedModPackageNames.length" class="mt-8 text-center text-[13px] text-fg-dim">
+            暂无本地 package，可导入文件夹或压缩包
+          </div>
+          <div v-else class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div v-for="pkg in installedMods.filter(p => installedModPackageNames.includes(p.name))" :key="pkg.name" class="flex items-center justify-between rounded border border-line px-3 py-3">
+              <div>
+                <div class="text-[13px] text-fg">{{ pkg.name }}</div>
+                <div class="mt-1 flex items-center gap-2 text-[11px] text-fg-dim">
+                  <span>{{ pkg.source?.provider === 'moddb' ? 'ModDB package · 可重新下载' : '本地 package' }}</span>
+                  <a v-if="pkg.source?.provider === 'moddb'" :href="pkg.source.page ?? `https://www.moddb.com/mods/${pkg.source.mod}/addons/${pkg.source.slug}`" target="_blank" rel="noreferrer" class="text-blue-400 hover:text-blue-300 hover:underline">打开 ModDB</a>
+                </div>
+              </div>
+              <button class="text-[12px] text-red-400 hover:text-red-300" @click="deletePackage(pkg.name)">删除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <template v-else>
       <!-- 左侧：仓库 MOD 列表 -->
       <div class="flex w-[320px] flex-col border-r border-line">
         <div class="flex items-center justify-between border-b border-line px-4 py-3">
-          <h3 class="text-[13px] font-medium text-fg">可用 MOD</h3>
+          <div class="flex items-center gap-1">
+            <button class="rounded px-2 py-1 text-[12px]" :class="zhPackageView === 'mods' ? 'bg-accent text-white' : 'text-fg-dim hover:text-fg'" @click="zhPackageView = 'mods'">可用 MOD</button>
+            <button class="rounded px-2 py-1 text-[12px] text-fg-dim hover:text-fg" @click="zhPackageView = 'packages'">本地 package</button>
+          </div>
           <button
             class="text-[12px] text-fg-dim hover:text-fg"
             @click="loadRepoMods"
@@ -2102,7 +2455,7 @@ async function run(key: string): Promise<void> {
                   <span class="text-[13px] text-fg">{{ mod.ModName }}</span>
                   <!-- 已安装标记 -->
                   <span
-                    v-if="installedMods.some(m => m.name === mod.ModName)"
+                    v-if="installedModNames.includes(mod.ModName)"
                     class="text-[10px] text-green-500"
                   >
                     已安装
@@ -2174,7 +2527,9 @@ async function run(key: string): Promise<void> {
           </div>
         </div>
       </div>
+      </template>
 
+      <template v-if="zhPackageView === 'mods'">
       <!-- 右侧：MOD 详情 + 下载 -->
       <div class="flex flex-1 flex-col overflow-hidden">
         <div v-if="selectedRepoMod" class="flex flex-1 flex-col overflow-hidden p-6">
@@ -2334,18 +2689,39 @@ async function run(key: string): Promise<void> {
         </div>
       </div>
 
-      <!-- 底部：已安装 MOD 列表 -->
-      <div class="absolute bottom-0 left-0 right-0 border-t border-line bg-panel">
+      <!-- 底部：已安装 MOD + 导入按钮 -->
+      <div
+        class="absolute bottom-0 left-0 right-0 border-t border-line bg-panel transition-colors"
+        :class="dropActive ? 'bg-accent/10 border-accent' : ''"
+        @dragover.prevent="dropActive = true"
+        @dragleave.prevent="dropActive = false"
+        @drop="onDropImport"
+      >
         <div class="flex items-center justify-between px-4 py-2">
           <span class="text-[12px] text-fg-dim">已安装: {{ installedMods.length }} 个 MOD</span>
-          <button
-            class="text-[12px] text-fg-dim hover:text-fg"
-            @click="loadInstalledMods"
-          >
-            刷新
-          </button>
+          <div class="flex gap-2">
+            <button
+              class="text-[12px] text-fg-dim hover:text-fg"
+              @click="importFolder"
+            >
+              导入文件夹
+            </button>
+            <button
+              class="text-[12px] text-fg-dim hover:text-fg"
+              @click="importArchive"
+            >
+              导入压缩包
+            </button>
+            <button
+              class="text-[12px] text-fg-dim hover:text-fg"
+              @click="loadInstalledMods"
+            >
+              刷新
+            </button>
+          </div>
         </div>
       </div>
+      </template>
       </template>
     </div>
 
@@ -2600,9 +2976,8 @@ async function run(key: string): Promise<void> {
               </div>
 
               <div class="flex items-center gap-2">
-                <input id="use-gtd" v-model="useGtd" type="checkbox" class="h-4 w-4 accent-accent" />
-                <label for="use-gtd" class="text-[13px] text-fg">启用 GeneralsTD 引擎</label>
-                <span v-if="useGtd && useGenTool" class="text-[11px] text-fg-dim">（GenTool 已自动禁用）</span>
+                <input id="use-gtd" v-model="useGtd" type="checkbox" class="h-4 w-4 accent-accent" disabled />
+                <label for="use-gtd" class="text-[13px] text-fg-dim">启用 GeneralsTD 引擎（暂未开放）</label>
               </div>
 
               <div v-if="useGtd">
@@ -2810,6 +3185,37 @@ async function run(key: string): Promise<void> {
     </div>
 
     <!-- 删除确认弹窗 -->
+    <div v-if="pendingInstallCommand" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" @click.self="!commandInstalling && (pendingInstallCommand = null)">
+      <div class="w-[560px] max-w-[90vw] border border-line bg-panel p-5 shadow-xl">
+        <h3 class="mb-2 text-[15px] font-medium text-fg">安装计划：{{ pendingInstallCommand.name }}</h3>
+        <p class="mb-3 text-[12px] text-fg-dim">确认后将自动下载缺失的 MOD、patch 和 addon，完成后创建播放集。</p>
+        <div class="mb-4 max-h-[260px] space-y-2 overflow-y-auto">
+          <div v-for="mod in pendingInstallCommand.mods ?? []" :key="mod.id" class="border border-line px-3 py-2">
+            <div class="text-[13px] text-fg">{{ mod.id }}</div>
+            <div class="mt-1 text-[11px] text-fg-dim">patch: {{ (mod.patches ?? []).join(', ') || '无' }} · addon: {{ (mod.addons ?? []).join(', ') || '无' }}</div>
+            <template v-for="item in [mod.id, ...(mod.patches ?? []).map((i: number) => `${mod.id}_patch_${i}`), ...(mod.addons ?? []).map((i: number) => `${mod.id}_addon_${i}`)]" :key="item">
+              <div v-if="commandInstalling" class="mt-1 flex items-center gap-2 text-[11px] text-fg-dim"><span class="min-w-0 flex-1 truncate">{{ item }}</span><span>{{ commandProgress[item]?.status === 'done' ? '完成' : commandProgress[item]?.status === 'extracting' ? '正在解压' : commandProgress[item]?.total ? `${commandProgress[item]?.progress ?? 0}%` : commandProgress[item]?.downloaded ? `已下载 ${(commandProgress[item].downloaded! / 1024 / 1024).toFixed(1)} MB` : '准备下载' }}</span></div>
+              <div v-if="commandInstalling" class="h-1 bg-bg"><div class="h-1 bg-accent transition-all" :style="{ width: `${commandProgress[item]?.progress ?? 0}%` }" /></div>
+            </template>
+          </div>
+          <div v-for="pkg in pendingInstallCommand.moddbPackages ?? []" :key="`moddb:${pkg.slug}`" class="border border-blue-500/40 px-3 py-2">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <div class="truncate text-[13px] text-fg">{{ pkg.slug }}</div>
+                <div class="mt-1 text-[11px] text-blue-400">ModDB {{ pkg.kind === 'download' ? 'download' : 'addon' }} package · {{ pkg.mod }}</div>
+              </div>
+              <span class="shrink-0 text-[11px] text-fg-dim">{{ commandProgress[pkg.slug]?.status === 'done' ? '完成' : commandProgress[pkg.slug]?.status === 'extracting' ? '正在解压' : commandInstalling ? `${commandProgress[pkg.slug]?.progress ?? 0}%` : '待安装' }}</span>
+            </div>
+            <div v-if="commandInstalling" class="mt-2 h-1 bg-bg"><div class="h-1 bg-blue-500 transition-all" :style="{ width: `${commandProgress[pkg.slug]?.progress ?? 0}%` }" /></div>
+          </div>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button class="border border-line px-4 py-1.5 text-[13px] text-fg-dim hover:text-fg" :disabled="commandInstalling" @click="pendingInstallCommand = null">取消</button>
+          <button class="bg-accent px-4 py-1.5 text-[13px] text-white hover:bg-accent-hi disabled:opacity-50" :disabled="commandInstalling" @click="confirmInstallCommand">{{ commandInstalling ? '安装中...' : '确认安装' }}</button>
+        </div>
+      </div>
+    </div>
+
     <div
       v-if="showDeleteConfirm"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"

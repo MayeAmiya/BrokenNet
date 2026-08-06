@@ -16,6 +16,7 @@ const useGtd = ref(false)
 const gtdPath = ref('')
 const resourceDir = ref('')
 const errorMsg = ref('')
+const discoveredPaths = ref<string[]>([])
 
 const availableGames = getAvailableGames()
 
@@ -42,9 +43,16 @@ onMounted(async () => {
   resourceDir.value = (await window.api.fs.getConfig('resourceDir')) ?? ''
 })
 
-function selectGame(game: GameProfile): void {
+async function selectGame(game: GameProfile): Promise<void> {
   selectedGame.value = game
   errorMsg.value = ''
+  discoveredPaths.value = await window.api.fs.discoverGamePaths(game.id)
+}
+
+function useDiscoveredPath(path: string): void {
+  if (isMentalOmega.value) generalsPath.value = path
+  else zeroHourPath.value = path
+  checkPartition()
 }
 
 async function selectGeneralsPath(): Promise<void> {
@@ -147,6 +155,14 @@ async function confirm(): Promise<void> {
           <button class="hover:text-fg" @click="selectedGame = null">← 返回</button>
           <span>/</span>
           <span class="text-fg">{{ selectedGame.name }}</span>
+        </div>
+
+        <div v-if="discoveredPaths.length" class="mb-5 max-w-[640px] rounded border border-line bg-panel p-3">
+          <p class="mb-2 text-[12px] text-fg-dim">检测到以下可能的安装目录，请确认后使用：</p>
+          <div v-for="path in discoveredPaths" :key="path" class="mb-1 flex items-center justify-between gap-3 text-[12px]">
+            <span class="truncate text-fg">{{ path }}</span>
+            <button class="shrink-0 border border-line px-2 py-1 text-fg-dim hover:border-accent hover:text-fg" @click="useDiscoveredPath(path)">使用此目录</button>
+          </div>
         </div>
 
         <div class="max-w-[480px]">

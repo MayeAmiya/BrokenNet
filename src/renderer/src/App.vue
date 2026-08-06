@@ -57,6 +57,7 @@ onMounted(async () => {
   // 首次启动（未配置资源库）→ 弹出引导
   const resourceDir = await window.api.fs.getConfig('resourceDir')
   needsSetup.value = !resourceDir
+  if (!resourceDir) setupPath.value = await window.api.fs.getDefaultResourceBase()
   // 启动即应用界面缩放（默认 125%，可从设置页调整）
   const scale = parseInt(localStorage.getItem('ui-scale') ?? '125', 10)
   if (!isNaN(scale)) document.documentElement.style.zoom = `${scale / 100}`

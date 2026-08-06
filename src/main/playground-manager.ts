@@ -16,10 +16,12 @@ import path from 'node:path'
 import { readFile } from 'node:fs/promises'
 import { app } from 'electron'
 import { ensureFullKeyboardMap } from './keyboard-reader'
+import { getModRoot } from './downloaded-mod-registry'
 
 export interface PlaygroundApplyOptions {
   gameId: string
   modSetId: string
+  useGenTool?: boolean
   onProgress?: (percent: number, label: string) => void
 }
 
@@ -388,6 +390,13 @@ function linkGlobalSettings(
 /** MOD 覆盖：把 MOD 目录的文件硬链接到 playground 同相对路径（后链接覆盖先链接） */
 function linkMod(modDir: string, playground: string, stats: LinkStats): void {
   const walk = (srcDir: string, dstDir: string): void => {
+    // MOD 覆盖绝不把目录本身链接进 playground；目录只是普通容器。
+    if (fs.existsSync(dstDir)) {
+      const dstStat = fs.lstatSync(dstDir)
+      if (dstStat.isSymbolicLink()) {
+        fs.unlinkSync(dstDir)
+      }
+    }
     fs.mkdirSync(dstDir, { recursive: true })
     for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
       const srcPath = path.join(srcDir, entry.name)
@@ -395,6 +404,10 @@ function linkMod(modDir: string, playground: string, stats: LinkStats): void {
       try {
         if (entry.isDirectory()) {
           walk(srcPath, dstPath)
+        } else if (entry.isSymbolicLink()) {
+          const resolved = fs.realpathSync(srcPath)
+          if (fs.statSync(resolved).isDirectory()) walk(resolved, dstPath)
+          else hardlinkOrSkip(resolved, dstPath, stats)
         } else if (entry.isFile()) {
           hardlinkOrSkip(srcPath, dstPath, stats)
         }
@@ -487,16 +500,25 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     // 3. 其余包覆盖（按播放集顺序，后覆盖胜出；本体包再次链接是幂等跳过）
     //    可写目录已在 linkOriginal 里按「本体包真实存在的目录」junction，不硬造其它游戏的可写目录
     const packageNames = await getPlaySetPackageNames(resourceDir, gameId, modSetId)
+    if (gameId === 'zero-hour' && packageNames.length === 0 && modSetId.startsWith('zh-package:')) {
+      packageNames.push(modSetId.slice('zh-package:'.length))
+    }
     const foreignBasePackage = gameId === 'mental-omega' ? 'ZeroHour' : 'MentalOmega'
     if (packageNames.length > 0) {
       onProgress?.(72, '链接包文件...')
       for (const packageName of packageNames) {
         if (packageName === basePkgName || packageName === foreignBasePackage) continue
-        const pkgDir = path.join(resourceDir, gameId, 'packages', packageName)
+        const packagesRoot = path.join(resourceDir, gameId, 'packages')
+        const modPkgDir = path.join(getModRoot(packagesRoot, packageName), packageName)
+        const isManagedMod = gameId === 'zero-hour' && fs.existsSync(modPkgDir)
+        const pkgDir = isManagedMod
+          ? modPkgDir
+          : path.join(packagesRoot, packageName)
         if (!fs.existsSync(pkgDir)) continue
         linkMod(pkgDir, playground, stats)
-        if (gameId === 'zero-hour') {
-          const siblingNames = fs.readdirSync(path.join(resourceDir, gameId, 'packages'), { withFileTypes: true })
+        if (isManagedMod) {
+          const modRoot = getModRoot(packagesRoot, packageName)
+          const siblingNames = fs.readdirSync(modRoot, { withFileTypes: true })
             .filter((entry) => entry.isDirectory() && (
               entry.name.startsWith(`${packageName}_patch_`) ||
               entry.name.startsWith(`${packageName}_addon_`)
@@ -504,7 +526,7 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
             .map((entry) => entry.name)
             .sort((a, b) => a.localeCompare(b))
           for (const siblingName of siblingNames) {
-            linkMod(path.join(resourceDir, gameId, 'packages', siblingName), playground, stats)
+            linkMod(path.join(modRoot, siblingName), playground, stats)
           }
         }
       }
@@ -517,6 +539,17 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     // 快捷键键位表要全量（游戏直接读 KeyboardMD.ini）：先播种完整键位，再硬链接进游戏目录
     ensureFullKeyboardMap(basePkgDir, path.join(resourceDir, gameId, 'settings'))
     linkGlobalSettings(resourceDir, gameId, basePkgDir, playground, stats)
+
+    // GenTool 是最终运行时覆盖层；包不存在时保留明确错误，避免静默启动不完整。
+    if (gameId === 'zero-hour' && opts.useGenTool) {
+      const genToolDir = path.join(resourceDir, gameId, 'packages', 'GenTool')
+      if (fs.existsSync(genToolDir)) {
+        onProgress?.(98, '覆盖 GenTool...')
+        linkMod(genToolDir, playground, stats)
+      } else {
+        onProgress?.(98, 'GenTool package 尚未安装，跳过覆盖...')
+      }
+    }
 
     // 5. 链接失败必须上报，不能「缺文件还返回成功」
     if (stats.failed > 0) {
@@ -532,4 +565,19 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     const err = e as Error
     return { ok: false, error: err.message }
   }
+}
+
+export function saveGenToolConfig(gameId: string, playgroundPath: string): void {
+  if (gameId !== 'zero-hour') return
+  const cfg = path.join(playgroundPath, 'd3d8.cfg')
+  if (!fs.existsSync(cfg)) return
+  const resourceDir = readConfigSync()?.resourceDir
+  if (!resourceDir) return
+  const targetDir = path.join(resourceDir, gameId, 'packages', 'GenTool')
+  fs.mkdirSync(targetDir, { recursive: true })
+  fs.copyFileSync(cfg, path.join(targetDir, 'd3d8.cfg'))
+}
+
+function readConfigSync(): { resourceDir?: string } | null {
+  try { return JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'config.json'), 'utf-8')) } catch { return null }
 }

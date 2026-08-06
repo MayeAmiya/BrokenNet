@@ -15,6 +15,20 @@ import { extractArchive } from './archive'
 import { getResourceDir } from './resource-dir'
 import type { PlaySet, InstalledPackage, ImportResult } from '../shared/types/content'
 import { resolveDirectChild } from './security-boundaries'
+import { getModRoot, readManagedMods, readDownloadedMods, writeDownloadedMods, unmarkDownloadedMod } from './downloaded-mod-registry'
+import { downloadFile } from './mod-ops'
+
+const modSetOperationQueues = new Map<string, Promise<unknown>>()
+
+function enqueueModSetOperation<T>(gameId: string, operation: () => Promise<T>): Promise<T> {
+  const previous = modSetOperationQueues.get(gameId) ?? Promise.resolve()
+  const current = previous.catch(() => undefined).then(operation)
+  modSetOperationQueues.set(gameId, current)
+  void current.finally(() => {
+    if (modSetOperationQueues.get(gameId) === current) modSetOperationQueues.delete(gameId)
+  })
+  return current
+}
 
 /** 复制游戏本体时排除的运行时写目录（本体包只含只读资源） */
 export const GAME_COPY_EXCLUDE = new Set([
@@ -63,13 +77,17 @@ function getForeignBasePackage(gameId: string): string {
 }
 
 function makeZhPackagePlaySet(packageName: string, existing?: PlaySet): PlaySet {
+  const extraPackages = existing?.packages
+    .filter((pkg) => pkg.name !== 'ZeroHour' && pkg.name !== packageName)
+    .map((pkg) => ({ id: pkg.name, name: pkg.name })) ?? []
   return {
     id: `zh-package:${packageName}`,
     name: existing?.name ?? packageName,
     description: existing?.description ?? `以 Zero Hour 为基底，加载 ${packageName}`,
     packages: [
       { id: 'ZeroHour', name: 'ZeroHour' },
-      { id: packageName, name: packageName }
+      { id: packageName, name: packageName },
+      ...extraPackages
     ]
   }
 }
@@ -80,9 +98,8 @@ async function syncZhPackagePlaySets(packagesDir: string, sets: PlaySet[]): Prom
   const packageNames = entries
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.endsWith('.downloading') && entry.name !== 'MentalOmega')
     .map((entry) => entry.name)
-  const mainPackages = [...new Set(packageNames.filter((name) =>
-    name !== 'ZeroHour' && !name.includes('_patch_') && !name.includes('_addon_')
-  ))]
+  const downloadedMods = await readManagedMods(packagesDir)
+  const mainPackages = downloadedMods.filter((name) => existsSync(join(getModRoot(packagesDir, name), name)))
   const vanilla = sets.find((set) => set.id === 'vanilla') ?? {
     id: 'vanilla',
     name: '原版',
@@ -91,22 +108,42 @@ async function syncZhPackagePlaySets(packagesDir: string, sets: PlaySet[]): Prom
   }
   vanilla.description = '只加载游戏本体（Zero Hour）'
   vanilla.packages = [{ id: 'ZeroHour', name: 'ZeroHour' }]
-  const automaticSets = mainPackages.sort((a, b) => a.localeCompare(b)).map((name) =>
-    makeZhPackagePlaySet(name, sets.find((set) => set.id === `zh-package:${name}`))
-  )
-  const copiedSets = sets.flatMap((set) => {
-    if (!set.id.startsWith('zh-copy:')) return []
-    const mainPackage = set.packages.find((pkg) => mainPackages.includes(pkg.name))?.name
-    if (!mainPackage) return []
-    return [{
-      ...set,
-      packages: [
-        { id: 'ZeroHour', name: 'ZeroHour' },
-        { id: mainPackage, name: mainPackage }
-      ]
-    }]
-  })
-  return [vanilla, ...automaticSets, ...copiedSets]
+
+  // 保留前端传入的所有非 zh-package、非 vanilla 的用户播放集（zh-copy、自定义等）
+  const userSets = sets
+    .filter((s) => !s.id.startsWith('zh-package:') && s.id !== 'vanilla')
+    .map((set) => {
+      const mainPackage = set.packages.find((pkg) => mainPackages.includes(pkg.name))?.name
+      const extraPackages = set.packages
+        .map((pkg) => pkg.name)
+        .filter((name) => name !== 'ZeroHour' && name !== mainPackage && existsSync(join(packagesDir, name)))
+      return {
+        ...set,
+        packages: [
+          { id: 'ZeroHour', name: 'ZeroHour' },
+          ...(mainPackage ? [{ id: mainPackage, name: mainPackage }] : []),
+          ...extraPackages.map((name) => ({ id: name, name }))
+        ]
+      }
+    })
+
+  // 前端已有的 zh-package 播放集（保留用户未删除的）
+  const existingAutoSets = sets
+    .filter((s) => s.id.startsWith('zh-package:'))
+    .map((set) => {
+      const name = set.id.slice('zh-package:'.length)
+      return mainPackages.includes(name) ? makeZhPackagePlaySet(name, set) : null
+    })
+    .filter((set): set is PlaySet => set !== null)
+  const existingAutoPkgNames = new Set(existingAutoSets.map((s) => s.id.replace('zh-package:', '')))
+
+  // 只为「尚未有播放集」的新下载 MOD 自动创建播放集，不恢复用户已删除的
+  const newAutoSets = mainPackages
+    .filter((name) => !existingAutoPkgNames.has(name))
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => makeZhPackagePlaySet(name))
+
+  return [vanilla, ...existingAutoSets, ...newAutoSets, ...userSets]
 }
 
 /** 加载播放集（兼容旧 mods 字段） */
@@ -161,28 +198,21 @@ async function ensureDefaultPlaySet(gameId: string): Promise<{ ok: boolean; erro
     const packagesDir = await getPackagesDir(gameId)
     const legacyModsDir = join(packagesDir, '..', 'mods')
 
-    // 1. mods/ → packages/。若两个目录都存在，逐包迁移，不能因为本体包已创建就跳过旧 MOD。
-    if (!existsSync(packagesDir) && existsSync(legacyModsDir)) {
-      await mkdir(dirname(packagesDir), { recursive: true })
-      await rename(legacyModsDir, packagesDir)
-      console.log(`[Packages] 已迁移 mods/ -> packages/ (${gameId})`)
-    }
+    // 新结构是单向的：packages 中的历史下载包迁入 mods/<MOD>/，绝不把 mods 搬回 packages。
     await mkdir(packagesDir, { recursive: true })
-    if (existsSync(legacyModsDir)) {
-      const legacyEntries = await readdir(legacyModsDir, { withFileTypes: true })
-      for (const entry of legacyEntries) {
-        if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name.endsWith('.downloading')) continue
-        const source = join(legacyModsDir, entry.name)
-        const target = join(packagesDir, entry.name)
-        if (existsSync(target)) {
-          console.warn(`[Packages] 旧包迁移跳过，目标已存在: ${entry.name}`)
-          continue
+    if (gameId === 'zero-hour') {
+      const historicalNames = await readDownloadedMods(packagesDir)
+      for (const modName of historicalNames) {
+        const modRoot = getModRoot(packagesDir, modName)
+        await mkdir(modRoot, { recursive: true })
+        const names = await readdir(packagesDir, { withFileTypes: true })
+        for (const entry of names) {
+          if (!entry.isDirectory() || (entry.name !== modName && !entry.name.startsWith(`${modName}_patch_`) && !entry.name.startsWith(`${modName}_addon_`))) continue
+          const target = join(modRoot, entry.name)
+          if (!existsSync(target)) await rename(join(packagesDir, entry.name), target)
         }
-        await rename(source, target)
-        console.log(`[Packages] 已迁移旧包 ${entry.name}: mods/ -> packages/`)
       }
     }
-
     // 2. modsets.json mods → packages
     const setsPath = await getModSetsPath(gameId)
     let sets: Array<PlaySet & { mods?: Array<{ id: string; name: string }> }> = []
@@ -265,9 +295,14 @@ async function listPackages(gameId: string): Promise<InstalledPackage[]> {
     const packagesDir = await getPackagesDir(gameId)
     await mkdir(packagesDir, { recursive: true })
     const entries = await readdir(packagesDir, { withFileTypes: true })
-    return entries
+    return await Promise.all(entries
       .filter((e) => e.isDirectory() && !e.name.startsWith('.') && !e.name.endsWith('.downloading') && e.name !== getForeignBasePackage(gameId))
-      .map((e) => ({ name: e.name, path: join(packagesDir, e.name) }))
+      .map(async (e) => {
+        const packagePath = join(packagesDir, e.name)
+        let source: { provider: string; mod: string; slug: string; kind?: 'addon' | 'download'; fileId?: string; page?: string } | undefined
+        try { source = JSON.parse(await readFile(join(packagePath, '.brokennet-source.json'), 'utf-8')) } catch { /* local package */ }
+        return { name: e.name, path: packagePath, source }
+      }))
   } catch {
     return []
   }
@@ -334,7 +369,13 @@ async function importPackageFromPaths(gameId: string, filePaths: string[]): Prom
 async function deletePackage(gameId: string, name: string): Promise<{ ok: boolean; error?: string }> {
   try {
     const packagesDir = await getPackagesDir(gameId)
-    await rm(resolveDirectChild(packagesDir, name), { recursive: true, force: true })
+    const modRoot = getModRoot(packagesDir, name)
+    if (gameId === 'zero-hour' && existsSync(modRoot)) {
+      await rm(modRoot, { recursive: true, force: true })
+    } else {
+      await rm(resolveDirectChild(packagesDir, name), { recursive: true, force: true })
+    }
+    await unmarkDownloadedMod(packagesDir, name)
     return { ok: true }
   } catch (e) {
     const err = e as Error
@@ -344,6 +385,78 @@ async function deletePackage(gameId: string, name: string): Promise<{ ok: boolea
 
 /** 注册包 / 播放集 IPC */
 export function registerPackageHandlers(): void {
+  ipcMain.handle('package:install-moddb-addon', async (_e, gameId: string, modName: string, slug: string, kind: 'addon' | 'download' = 'addon') => {
+    if (gameId !== 'zero-hour' || !/^[a-z0-9][a-z0-9-_-]{1,80}$/i.test(modName) || !/^[a-z0-9][a-z0-9-_-]{1,120}$/i.test(slug)) return { ok: false, error: '无效的 ModDB addon 命令' }
+    const resourceDir = await getResourceDir()
+    if (!resourceDir) return { ok: false, error: '请先设置资源目录' }
+    const existingPackageDir = join(resourceDir, gameId, 'packages', slug)
+    let existingSource: { provider?: string; mod?: string; slug?: string; kind?: string; fileId?: string } | undefined
+    try {
+      if ((await stat(existingPackageDir)).isDirectory()) {
+        try { existingSource = JSON.parse(await readFile(join(existingPackageDir, '.brokennet-source.json'), 'utf-8')) } catch { /* 旧 package 无完整来源信息，需要重新校验下载 */ }
+      }
+    } catch { /* 尚未安装 */ }
+    const view = new BrowserWindow({ show: false, webPreferences: { offscreen: true, contextIsolation: true, sandbox: true } })
+    try {
+      view.webContents.session.webRequest.onBeforeRequest({ urls: ['*://ads.pubmatic.com/*', '*://u.openx.net/*', '*://*.primis.tech/*', '*://*.doubleclick.net/*', '*://*.googlesyndication.com/*'] }, (_details, callback) => callback({ cancel: true }))
+      const page = `https://www.moddb.com/mods/${encodeURIComponent(modName)}/${kind === 'download' ? 'downloads' : 'addons'}/${encodeURIComponent(slug)}`
+      await view.loadURL(page)
+      await new Promise((resolve) => setTimeout(resolve, 2500))
+      const start = await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('a')).map(a => a.href).find(href => href.includes('/${kind === 'download' ? 'downloads' : 'addons'}/start/')) || null`, true)
+      if (!start) throw new Error('未找到 ModDB addon 下载入口，可能需要先完成页面验证')
+      const fileId = String(start).match(/\/start\/(\d+)/)?.[1]
+      if (!fileId) throw new Error('无法识别 ModDB 文件编号')
+      if (
+        existingSource?.provider === 'moddb' &&
+        existingSource.mod?.toLowerCase() === modName.toLowerCase() &&
+        existingSource.slug?.toLowerCase() === slug.toLowerCase() &&
+        existingSource.kind === kind &&
+        existingSource.fileId === fileId
+      ) {
+        _e.sender.send('package:moddb-progress', { slug, status: 'done', progress: 100, received: 0, total: 0 })
+        return { ok: true, alreadyInstalled: true, packageName: slug }
+      }
+      await view.loadURL(start)
+      const mirror = await view.webContents.executeJavaScript(`Array.from(document.querySelectorAll('a')).map(a => a.href).find(href => href.includes('/downloads/mirror/')) || null`, true)
+      if (!mirror) throw new Error('未找到 ModDB 下载镜像链接')
+      const packageDir = join(resourceDir, gameId, 'packages', slug)
+      const archivePath = join(resourceDir, gameId, 'temp', `${slug}.download`)
+      await mkdir(dirname(archivePath), { recursive: true })
+      // BrowserWindow 只负责把 ModDB mirror 解析成最终文件 URL。Electron 的
+      // DownloadItem 在这些镜像上经常不发送中间 updated 事件，因此实际下载交给 aria2c。
+      const directUrl = await new Promise<string>((resolve, reject) => {
+        view.webContents.session.once('will-download', (_event, item) => {
+          const url = item.getURL()
+          item.cancel()
+          url ? resolve(url) : reject(new Error('无法获取 ModDB 最终下载地址'))
+        })
+        void view.loadURL(mirror).catch((error) => { if (!String(error).includes('ERR_FAILED')) reject(error) })
+      })
+      let downloadedBytes = 0
+      const downloadResult = await downloadFile(directUrl, archivePath, `moddb:${slug}`, (received, total, percent) => {
+        downloadedBytes = Math.max(downloadedBytes, received)
+        _e.sender.send('package:moddb-progress', {
+          slug,
+          status: 'downloading',
+          progress: percent !== undefined ? Math.min(94, Math.round(percent * 0.94)) : total > 0 ? Math.min(94, Math.round(received / total * 94)) : 0,
+          received,
+          total
+        })
+      })
+      if (!downloadResult.ok) throw new Error(downloadResult.error ?? 'ModDB 下载失败')
+      downloadedBytes = (await stat(archivePath)).size
+      if (existsSync(packageDir)) {
+        const quarantineDir = join(resourceDir, gameId, 'quarantine', 'moddb-refresh')
+        await mkdir(quarantineDir, { recursive: true })
+        await rename(packageDir, join(quarantineDir, `${slug}-${Date.now()}`))
+      }
+      _e.sender.send('package:moddb-progress', { slug, status: 'extracting', progress: 95, received: downloadedBytes, total: downloadedBytes })
+      await extractArchive(archivePath, packageDir); await rm(archivePath, { force: true })
+      await writeFile(join(packageDir, '.brokennet-source.json'), JSON.stringify({ provider: 'moddb', mod: modName, slug, kind, fileId, page }, null, 2))
+      _e.sender.send('package:moddb-progress', { slug, status: 'done', progress: 100, received: downloadedBytes, total: downloadedBytes })
+      return { ok: true, packageName: slug }
+    } catch (error) { return { ok: false, error: (error as Error).message } } finally { view.destroy() }
+  })
   ipcMain.handle('package:list', async (_e, gameId: string) => {
     return { ok: true, packages: await listPackages(gameId) }
   })
@@ -374,13 +487,16 @@ export function registerPackageHandlers(): void {
   })
   ipcMain.handle('modset:save', (_e, gameId: string, playSets: PlaySet[]) => {
     console.log(`[modset:save] gameId=${gameId} 收到 ${playSets?.length} 个播放集`)
-    if (gameId === 'zero-hour') {
-      return getPackagesDir(gameId).then(async (packagesDir) => {
+    return enqueueModSetOperation(gameId, async () => {
+      if (gameId === 'zero-hour') {
+        const packagesDir = await getPackagesDir(gameId)
         const normalized = await syncZhPackagePlaySets(packagesDir, playSets)
         return savePlaySets(gameId, normalized)
-      })
-    }
-    return savePlaySets(gameId, playSets)
+      }
+      return savePlaySets(gameId, playSets)
+    })
   })
-  ipcMain.handle('modset:ensure-default', (_e, gameId: string) => ensureDefaultPlaySet(gameId))
+  ipcMain.handle('modset:ensure-default', (_e, gameId: string) =>
+    enqueueModSetOperation(gameId, () => ensureDefaultPlaySet(gameId))
+  )
 }

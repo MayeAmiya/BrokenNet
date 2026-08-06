@@ -39,7 +39,7 @@ import { loadStatisticsWindow } from './statistics-reader'
 import { loadUserDefaults } from './user-defaults'
 import { loadMusicThemes } from './music-theme-reader'
 import { readMultiplayerLobbyOptions } from './game-options-reader'
-import { applyPlayground } from './playground-manager'
+import { applyPlayground, saveGenToolConfig } from './playground-manager'
 import { isAllowedExternalUrl } from './security-boundaries'
 import { loadZhSinglePlayer } from './zh-singleplayer-reader'
 import { findBigWithGameData, setBigCameraHeight } from './big-reader'
@@ -232,6 +232,7 @@ function registerGameHandlers(): void {
         } catch (e) {
           console.error('[keyboard] 游戏退出后重播 KeyboardMD 失败:', e)
         }
+        try { saveGenToolConfig('zero-hour', opts.gameDir) } catch (e) { console.error('[GenTool] d3d8.cfg 回写失败:', e) }
         mainWindow?.webContents.send('game:exited', code)
       }
     })
@@ -623,6 +624,7 @@ function registerIniHandlers(): void {
     return applyPlayground({
       gameId,
       modSetId,
+      useGenTool: gameId === 'zero-hour',
       onProgress: (percent, label) => {
         // 窗口可能已关闭（webContents 销毁），send 会抛异常，必须防护
         try {

@@ -20,6 +20,10 @@ const api = {
     isMaximized: (): Promise<boolean> => ipcRenderer.invoke('win:is-maximized'),
     setSize: (width: number, height: number): Promise<void> => ipcRenderer.invoke('win:set-size', width, height)
   },
+  clipboard: {
+    writeText: (value: string): Promise<void> => ipcRenderer.invoke('clipboard:write-text', value),
+    readText: (): Promise<string> => ipcRenderer.invoke('clipboard:read-text')
+  },
   fs: {
     hardlink: (
       src: string,
@@ -46,6 +50,8 @@ const api = {
     }> => ipcRenderer.invoke('fs:list-replays', gameId),
     selectDirectory: (): Promise<{ path: string | null }> =>
       ipcRenderer.invoke('fs:select-directory'),
+    getDefaultResourceBase: (): Promise<string> => ipcRenderer.invoke('fs:get-default-resource-base'),
+    discoverGamePaths: (gameId: string): Promise<string[]> => ipcRenderer.invoke('fs:discover-game-paths', gameId),
     /** 首启引导：在基目录下创建 BrokenNetLib 并设为资源库（已存在则复用不覆写） */
     initResourceDir: (basePath: string): Promise<{ ok: boolean; path?: string; reused?: boolean; error?: string }> =>
       ipcRenderer.invoke('fs:init-resource-dir', basePath),
@@ -83,6 +89,8 @@ const api = {
       ipcRenderer.invoke('fs:load-all-games')
   },
   mod: {
+    listInstalled: (gameId: string): Promise<{ ok: boolean; mods: string[]; packages: string[]; error?: string }> =>
+      ipcRenderer.invoke('mod:list-installed', gameId),
     fetchRepoMods: (gameType: 'zh' | 'gen'): Promise<{
       ok: boolean
       data?: {
@@ -126,7 +134,7 @@ const api = {
     }
   },
   package: {
-    list: (gameId: string): Promise<{ ok: boolean; packages: Array<{ name: string; path: string }>; error?: string }> =>
+    list: (gameId: string): Promise<{ ok: boolean; packages: Array<{ name: string; path: string; source?: { provider: string; mod: string; slug: string; kind?: 'addon' | 'download'; fileId?: string; page?: string } }>; error?: string }> =>
       ipcRenderer.invoke('package:list', gameId),
     importFolder: (gameId: string): Promise<{ ok: boolean; imported?: string[]; error?: string }> =>
       ipcRenderer.invoke('package:import-folder', gameId),
@@ -135,7 +143,14 @@ const api = {
     importPaths: (gameId: string, paths: string[]): Promise<{ ok: boolean; imported?: string[]; error?: string }> =>
       ipcRenderer.invoke('package:import-paths', gameId, paths),
     delete: (gameId: string, name: string): Promise<{ ok: boolean; error?: string }> =>
-      ipcRenderer.invoke('package:delete', gameId, name)
+      ipcRenderer.invoke('package:delete', gameId, name),
+    installModdbAddon: (gameId: string, modName: string, slug: string, kind: 'addon' | 'download' = 'addon'): Promise<{ ok: boolean; alreadyInstalled?: boolean; packageName?: string; error?: string }> =>
+      ipcRenderer.invoke('package:install-moddb-addon', gameId, modName, slug, kind),
+    onModdbProgress: (callback: (data: { slug: string; status: string; progress: number; received: number; total: number }) => void) => {
+      const handler = (_e: Electron.IpcRendererEvent, data: unknown) => callback(data as any)
+      ipcRenderer.on('package:moddb-progress', handler)
+      return () => ipcRenderer.removeListener('package:moddb-progress', handler)
+    }
   },
   sound: {
     read: (gameId: string): Promise<Record<string, number>> => ipcRenderer.invoke('sound:read', gameId),
