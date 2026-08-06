@@ -2,6 +2,7 @@
 node_modules/
 out/
 dist/
+dist-release/
 
 # 日志与崩溃转储
 *.log
@@ -14,6 +15,8 @@ crash_log.txt
 # 临时文件
 .tmp-*/
 .tmp-*
+aria2-tmp/
+aria2.zip
 
 # 运行时数据（本地 mod 副本等）
 mods/custom/

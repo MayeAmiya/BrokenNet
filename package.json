@@ -28,6 +28,10 @@
         "to": "7z.exe"
       },
       {
+        "from": "resources/7z.dll",
+        "to": "7z.dll"
+      },
+      {
         "from": "resources/aria2c.exe",
         "to": "aria2c.exe"
       }
