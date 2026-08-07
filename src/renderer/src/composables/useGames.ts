@@ -64,7 +64,7 @@ async function loadGamesFromDisk(): Promise<void> {
         exe: g.id === 'mental-omega'
           ? 'MentalOmegaClient.exe'
           : g.useGtd && g.gtdPath
-            ? `${g.gtdPath}\\GeneralsTD.exe`
+            ? `${g.gtdPath}\\generals_td.exe`
             : `${g.generalsPath}\\Generals.exe`
       }
     }

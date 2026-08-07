@@ -211,6 +211,11 @@ function parseIniContent(content: string): CCIniFile {
   return file
 }
 
+/** 从 BIG/VFS 已读出的文本解析 INI（不需要落地临时文件）。 */
+export function loadIniText(content: string): CCIniFile {
+  return parseIniContent(content)
+}
+
 /**
  * Load an INI file with BasedOn chain support.
  * [INISystem] BasedOn=file1.ini,file2.ini

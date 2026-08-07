@@ -306,7 +306,8 @@ async function updateGameConfig(gameId: string, config: Partial<GameConfig>): Pr
       `name=${existingConfig.name ?? ''}`,
       `installPath=${existingConfig.installPath ?? ''}`,
       existingConfig.generalsPath ? `generalsPath=${existingConfig.generalsPath}` : '',
-      existingConfig.useGtd ? `useGtd=${existingConfig.useGtd}` : '',
+      // 始终写出开关状态，避免旧的配置值在切换后残留或加载时产生歧义。
+      `useGtd=${existingConfig.useGtd ?? 'false'}`,
       existingConfig.gtdPath ? `gtdPath=${existingConfig.gtdPath}` : '',
       existingConfig.useGenTool ? `useGenTool=${existingConfig.useGenTool}` : '',
       `updatedAt=${new Date().toISOString()}`

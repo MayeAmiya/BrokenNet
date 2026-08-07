@@ -36,12 +36,30 @@ const {
 } = useGameConfig()
 
 // 游戏设置
-const useGtd = ref(false)
+// 从已加载的游戏配置初始化；否则每次进入页面都会把持久化值显示成关闭。
+const useGtd = ref(props.profile.useGtd ?? false)
 const gtdPath = ref(props.profile.gtdPath ?? '')
 const useGenTool = ref(props.profile.useGenTool ?? true)
+const tdResolution = ref(localStorage.getItem('td-resolution') ?? '1920x1080')
+const tdFxaa = ref(localStorage.getItem('td-fxaa') ?? 'off')
+const tdAnisotropy = ref(Number(localStorage.getItem('td-anisotropy') ?? '4'))
+const tdVsync = ref(localStorage.getItem('td-vsync') === 'true')
+const tdWindowed = ref(localStorage.getItem('td-windowed') === 'true')
+watch([tdResolution, tdFxaa, tdAnisotropy, tdVsync, tdWindowed], () => {
+  localStorage.setItem('td-resolution', tdResolution.value)
+  localStorage.setItem('td-fxaa', tdFxaa.value)
+  localStorage.setItem('td-anisotropy', String(tdAnisotropy.value))
+  localStorage.setItem('td-vsync', String(tdVsync.value))
+  localStorage.setItem('td-windowed', String(tdWindowed.value))
+})
 
 // 启用 GeneralsTD 时，GenTool 无效
 watch(useGtd, (val) => {
+  if (val && !gtdPath.value) {
+    useGtd.value = false
+    toastError('请先选择 GeneralsTD 目录')
+    return
+  }
   if (val) useGenTool.value = false
   // GeneralsTD 仅影响 ZH；MO 的单人战役和联机入口始终可用。
   if (!isMentalOmega.value && !val && (activeTab.value === 'campaign' || activeTab.value === 'multiplayer')) activeTab.value = 'modsets'
@@ -64,6 +82,17 @@ const samePartition = computed(() => {
 })
 
 const isMentalOmega = computed(() => props.profile.id === 'mental-omega')
+
+async function onZhSinglePlayerLaunch(selection: { mode: 'campaign' | 'challenge'; id: string; mission?: string; map?: string; template?: string; side?: string; baseSide?: string; difficulty: number; fromStart: boolean }): Promise<void> {
+  console.log('[ZH/TD] 单人启动选择:', selection)
+  if (useGtd.value && gtdPath.value) {
+    const playground = currentPlaygroundPath.value || props.profile.installPath
+    const root = playground.replace(/[\\/]playground[\\/]?$/i, '')
+    const template = selection.template || 'FactionAmerica'
+    const result = await window.api.game.launchTd({ gtdPath: gtdPath.value, generalsPath: `${root}\\generals`, zeroHourPath: `${root}\\zh`, playgroundPath: playground, mode: selection.mode, campaign: selection.id, mission: selection.mission || '', map: selection.map || '', template, side: selection.side, baseSide: selection.baseSide, difficulty: selection.difficulty })
+    if (!result.ok) toastError(result.error ?? 'TD 启动失败')
+  } else toastSuccess(`${selection.mode === 'campaign' ? '战役' : '挑战'}已选择：${selection.mission || '从头开始'}`)
+}
 
 const tabs = computed(() => {
   const allTabs = [
@@ -947,7 +976,7 @@ async function launch(): Promise<void> {
   const exe = isMO
     ? 'Syringe.exe'
     : props.profile.useGtd && props.profile.gtdPath
-      ? `${props.profile.gtdPath}\\GeneralsTD.exe`
+      ? `${props.profile.gtdPath}\\generals_td.exe`
       : `${props.profile.generalsPath}\\Generals.exe`
   // MO 启动：Syringe.exe "gamemd.exe" -SPAWN -CD ... （Syringe 第一个参数是游戏本体名）
   // ZH 直接启动：generals.exe [-win]，不走 spawn.ini（对齐 GenLauncher）
@@ -1719,7 +1748,7 @@ async function saveSettings(): Promise<void> {
       launch: {
         type: 'launch' as const,
         exe: useGtd.value
-          ? `${gtdPath.value}\\GeneralsTD.exe`
+          ? `${gtdPath.value}\\generals_td.exe`
           : `${props.profile.generalsPath}\\Generals.exe`
       }
     }
@@ -2834,6 +2863,7 @@ async function run(key: string): Promise<void> {
         :game-path="currentPlaygroundPath || profile.installPath"
         :original="selectedModSetId === 'vanilla'"
         :revision="playgroundRevision"
+        @launch="onZhSinglePlayerLaunch"
       />
     </div>
 
@@ -2982,8 +3012,8 @@ async function run(key: string): Promise<void> {
               </div>
 
               <div class="flex items-center gap-2">
-                <input id="use-gtd" v-model="useGtd" type="checkbox" class="h-4 w-4 accent-accent" disabled />
-                <label for="use-gtd" class="text-[13px] text-fg-dim">启用 GeneralsTD 引擎（暂未开放）</label>
+                <input id="use-gtd" v-model="useGtd" type="checkbox" class="h-4 w-4 accent-accent" />
+                <label for="use-gtd" class="text-[13px] text-fg">启用 GeneralsTD 引擎</label>
               </div>
 
               <div v-if="useGtd">
@@ -3064,9 +3094,13 @@ async function run(key: string): Promise<void> {
                 </div>
               </div>
 
-              <!-- GeneralsTD 的画质配置格式将在引擎接入阶段单独实现。 -->
-              <div v-else-if="useGtd" class="py-8 text-center text-[13px] text-fg-dim">
-                GeneralsTD 画质设置暂未实现
+              <div v-else-if="useGtd" class="space-y-4">
+                <div><label class="mb-1 block text-[12px] text-fg-dim">TD 分辨率</label><select v-model="tdResolution" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg"><option v-for="res in ['1280x720','1600x900','1920x1080','2560x1440','3840x2160']" :key="res" :value="res">{{ res }}</option></select></div>
+                <div><label class="mb-1 block text-[12px] text-fg-dim">FXAA</label><select v-model="tdFxaa" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg"><option value="off">关闭</option><option value="low">低</option><option value="high">高</option></select></div>
+                <div><label class="mb-1 block text-[12px] text-fg-dim">各向异性过滤</label><select v-model.number="tdAnisotropy" class="w-full border border-line bg-bg px-3 py-2 text-[13px] text-fg"><option :value="1">1x</option><option :value="2">2x</option><option :value="4">4x</option><option :value="8">8x</option><option :value="16">16x</option></select></div>
+                <label class="flex items-center gap-2 text-[13px] text-fg"><input v-model="tdVsync" type="checkbox" class="accent-accent" />垂直同步</label>
+                <label class="flex items-center gap-2 text-[13px] text-fg"><input v-model="tdWindowed" type="checkbox" class="accent-accent" />窗口化运行</label>
+                <p class="text-[11px] text-fg-dim">TD 设置独立保存，不会修改 ZH 原版画质配置。</p>
               </div>
 
               <!-- 原版绝命时刻：对齐 GenLauncher 的 Options.ini 画质项。 -->

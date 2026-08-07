@@ -23,6 +23,7 @@ export interface LaunchGameOptions {
   spawnOptions: SpawnIniOptions
   /** 额外命令行参数 */
   args?: string[]
+  skipSpawnIni?: boolean
   /** 启动后回调 */
   onLaunched?: () => void
   /** 退出回调 */
@@ -66,7 +67,7 @@ export function launchGame(opts: LaunchGameOptions): LaunchGameResult {
   }
 
   // 写入 spawn.ini
-  try {
+  if (!opts.skipSpawnIni) try {
     writeSpawnIni(opts.gameDir, opts.spawnOptions)
   } catch (err) {
     return { ok: false, error: `写入 spawn.ini 失败: ${err}` }

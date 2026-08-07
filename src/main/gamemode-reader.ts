@@ -4,6 +4,8 @@ import { loadIniFile, CCIniFile } from './ini-parser'
 import { getResourceDir } from './resource-dir'
 import { findMapInBundle } from './map-library-ops'
 import { readWaypoints, readMapSizeInfo } from './map-preview'
+import { readGeneralsVfsBuffer } from './big-reader'
+import { decodeText, detectTextEncoding } from './ini-parser'
 
 export interface GameModeConfig {
   name: string
@@ -46,6 +48,49 @@ export interface MapConfig {
   forcedSpawnIniOptions: Record<string, string>
   extraIniName?: string
   baseSection?: string
+}
+
+function decodeBigMapName(value: string): string {
+  return value.replace(/_([0-9a-f]{2})_/gi, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16))).replace(/\\/g, '/')
+}
+
+/** 读取 ZH/TD 的 Maps/MapCache.ini（它通常位于 MapsZH.big，而不是 loose 文件）。 */
+export async function loadTdMapCache(gameDirs: string[]): Promise<MapConfig[]> {
+  const entries = new Map<string, string>()
+  for (const dir of gameDirs) {
+    const buffer = await readGeneralsVfsBuffer(dir, 'Maps/MapCache.ini')
+    if (!buffer) continue
+    const text = decodeText(buffer, detectTextEncoding(buffer))
+    let current: { path: string; values: Record<string, string>; waypoints: Record<number, { x: number; y: number }> } | null = null
+    const flush = (): void => {
+      if (!current || !/^yes$/i.test(current.values.isMultiplayer ?? '')) return
+      const mapPath = decodeBigMapName(current.path)
+      const max = current.values.extentMax?.match(/X:([\d.-]+)\s+Y:([\d.-]+)/i)
+      const players = Math.max(2, Number.parseInt(current.values.numPlayers ?? '2', 10) || 2)
+      entries.set(mapPath.toLowerCase(), JSON.stringify({
+        filePath: mapPath,
+        baseFilePath: mapPath,
+        description: (current.values.nameLookupTag ?? '').replace(/^MAP:/i, '') || path.basename(mapPath, '.map'),
+        gameModes: [], minPlayers: players, maxPlayers: players, enforceMaxPlayers: true,
+        size: max ? `${max[1]}x${max[2]}` : '', localSize: '', previewSize: '',
+        waypoints: current.waypoints, isCoopMission: false, briefing: '',
+        disallowedPlayerSides: [], disallowedPlayerColors: [], enemyHouses: [], forcedOptions: {}, forcedSpawnIniOptions: {}
+      }))
+    }
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim()
+      const header = line.match(/^MapCache\s+(.+)$/i)
+      if (header) { flush(); current = { path: header[1].trim(), values: {}, waypoints: {} }; continue }
+      if (/^END$/i.test(line)) { flush(); current = null; continue }
+      if (!current) continue
+      const waypoint = line.match(/^Player_(\d+)_Start\s*=\s*X:([\d.-]+)\s+Y:([\d.-]+)/i)
+      if (waypoint) { current.waypoints[Number(waypoint[1]) - 1] = { x: Number(waypoint[2]), y: Number(waypoint[3]) }; continue }
+      const assignment = line.match(/^([^=]+?)\s*=\s*(.*)$/)
+      if (assignment) current.values[assignment[1].trim()] = assignment[2].trim()
+    }
+    flush()
+  }
+  return [...entries.values()].map((value) => JSON.parse(value) as MapConfig)
 }
 
 function parseWaypoints(ini: CCIniFile, sectionName: string): Record<number, { x: number; y: number }> {

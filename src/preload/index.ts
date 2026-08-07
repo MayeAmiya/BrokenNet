@@ -190,6 +190,7 @@ const api = {
     }> => ipcRenderer.invoke('options:get-resolutions', gameType)
   },
   game: {
+    launchTd: (opts: { gtdPath: string; generalsPath: string; zeroHourPath: string; playgroundPath: string; mode: 'campaign' | 'challenge'; campaign: string; mission: string; map: string; template: string; side?: string; baseSide?: string; difficulty: number }): Promise<{ ok: boolean; error?: string; pid?: number }> => ipcRenderer.invoke('game:launch-td', opts),
     launch: (opts: {
       gameDir: string
       exe: string
@@ -495,7 +496,7 @@ const api = {
   },
   playground: {
     apply: (gameId: string, modSetId: string): Promise<{
-      ok: boolean; playgroundPath?: string; mapsPath?: string; error?: string
+      ok: boolean; playgroundPath?: string; mapsPath?: string; generalsPath?: string; zeroHourPath?: string; error?: string
     }> => ipcRenderer.invoke('playground:apply', gameId, modSetId),
     onProgress: (callback: (data: { percent: number; label: string }) => void) => {
       const handler = (_e: Electron.IpcRendererEvent, data: { percent: number; label: string }) => callback(data)
@@ -757,7 +758,7 @@ const api = {
     load: (gamePath: string, includeCampaigns: boolean): Promise<{
       campaigns: Array<{ id: string; label: string; firstMission: string; playerFaction: string; challenge: boolean; missions: Array<{ id: string; map: string; nextMission: string; location: string; generalName: string }> }>
       challengeCampaigns: Array<{ id: string; label: string; firstMission: string; playerFaction: string; challenge: boolean; missions: Array<{ id: string; map: string; nextMission: string; location: string; generalName: string }> }>
-      generals: Array<{ index: number; enabled: boolean; name: string; rank: string; branch: string; strategy: string; campaign: string; playerTemplate: string }>
+      generals: Array<{ index: number; enabled: boolean; name: string; rank: string; branch: string; strategy: string; campaign: string; playerTemplate: string; side: string; baseSide: string }>
     }> => ipcRenderer.invoke('zh-singleplayer:load', gamePath, includeCampaigns)
   },
   translation: {

@@ -11,7 +11,7 @@ import { registerModHandlers } from './mod-ops'
 import { registerPackageHandlers } from './package-ops'
 import { registerMapLibraryHandlers } from './map-library-ops'
 import { registerSoundHandlers } from './sound-ops'
-import { getSettingsDir } from './resource-dir'
+import { getSettingsDir, getResourceDir } from './resource-dir'
 import { registerOptionsHandlers } from './options-ops'
 import { launchGame, isGameRunning, getGamePid } from './game-launcher'
 import { cncnet, CNCNET_GAMES } from './cncnet'
@@ -25,7 +25,7 @@ import { readClientConfig, readDTACnCNetConfig } from './client-config-reader'
 import { loadWindowLayout } from './ini-layout-parser'
 import { applyRenderer, cleanRenderer, writeRendererWindowedMode, readRendererWindowedMode, rendererUsesCustomWindowedOption, readRendererResolution, writeRendererResolution } from './renderer-manager'
 import { readGlobalForcedSpawnOptions, readGameModeForcedSpawnOptions, applyAllForcedSpawnOptions, generateSpawnIni } from './forced-spawn-options'
-import { loadGameModes, loadMaps, loadLibraryMaps } from './gamemode-reader'
+import { loadGameModes, loadMaps, loadLibraryMaps, loadTdMapCache } from './gamemode-reader'
 import { applyMapCode, getMapCodeFiles } from './map-code-helper'
 import { findMapFileByName } from './map-preview'
 import { loadMapPreviewData, loadMapPreviewByName, findMapByHash, findMapInfoByHash, findMapHashByName } from './map-preview'
@@ -41,7 +41,7 @@ import { loadMusicThemes } from './music-theme-reader'
 import { readMultiplayerLobbyOptions } from './game-options-reader'
 import { applyPlayground, saveGenToolConfig } from './playground-manager'
 import { isAllowedExternalUrl } from './security-boundaries'
-import { loadZhSinglePlayer } from './zh-singleplayer-reader'
+import { loadZhSinglePlayer, loadZhSinglePlayerLayers } from './zh-singleplayer-reader'
 import { findBigWithGameData, setBigCameraHeight } from './big-reader'
 
 const isDev = !app.isPackaged
@@ -202,6 +202,15 @@ function registerWindowHandlers(): void {
 }
 
 function registerGameHandlers(): void {
+  ipcMain.handle('game:launch-td', async (_event, opts: { gtdPath: string; generalsPath: string; zeroHourPath: string; playgroundPath: string; mode: 'campaign' | 'challenge'; campaign: string; mission: string; map: string; template: string; side?: string; baseSide?: string; difficulty: number }) => {
+    const ticket = `bn-${Date.now()}`
+    const side = opts.side || (/China/i.test(opts.template) ? 'China' : /GLA/i.test(opts.template) ? 'GLA' : 'America')
+    const descriptor = `[Content]\nContentRoot=${opts.zeroHourPath}\nBaseContentRoot=${opts.generalsPath}\nModRoot=${opts.playgroundPath}\nUserRoot=${join(opts.gtdPath, 'user')}\nLocale=chinese\n\n[Game]\nDescriptorVersion=1\nMode=${opts.mode === 'campaign' ? 'singleplayer' : 'challenge'}\nMap=${opts.map}\nDifficulty=${opts.difficulty}\nRankPoints=0\nGameSpeedFPS=30\nSeed=0\nStartingMoney=0\nSuperweaponRestricted=false\nOldFactionsOnly=false\n\n[LocalPlayer]\nSlot=0\nTemplate=${opts.template}\nSide=${side}\nBaseSide=${side}\n\n[Sequence]\nType=${opts.mode}\nCampaignName=${opts.campaign}\nMissionName=${opts.mission}\n${opts.mode === 'challenge' ? `ChallengeGeneral=${opts.template}\n` : ''}\n[Slot0]\nState=human\n`
+    const normalizedDescriptor = descriptor.replace(`BaseSide=${side}`, `BaseSide=${opts.baseSide || (side === 'America' ? 'USA' : side)}`)
+    const descriptorPath = join(opts.gtdPath, 'sessions', `${ticket}.ini`)
+    const { mkdir } = await import('node:fs/promises'); await mkdir(dirname(descriptorPath), { recursive: true }); writeFileSync(descriptorPath, normalizedDescriptor, 'utf8')
+    return launchGame({ gameDir: opts.gtdPath, exe: 'generals_td.exe', args: [`--session-descriptor=${descriptorPath}`, `--session-ticket=${ticket}`], spawnOptions: {} as SpawnIniOptions, skipSpawnIni: true })
+  })
   ipcMain.handle('game:launch', async (_event, opts: {
     gameDir: string
     exe: string
@@ -528,6 +537,14 @@ function registerIniHandlers(): void {
   })
 
   ipcMain.handle('maps:load', async (_event, gamePath: string, gameId?: string) => {
+    if (gameId === 'zero-hour') {
+      const resourceDir = await getResourceDir()
+      const useGtd = resourceDir && /^true$/i.test(readFileSync(join(resourceDir, gameId, 'game.ini'), 'utf-8').match(/^useGtd=(.*)$/mi)?.[1]?.trim() ?? '')
+      if (useGtd) {
+        const root = join(resourceDir, gameId)
+        return loadTdMapCache([join(root, 'zh'), join(root, 'playground')])
+      }
+    }
     const installMaps = loadMaps(gamePath)
     // 合并独立地图库（下载地图，文件夹包）
     if (gameId) {
@@ -647,7 +664,12 @@ function registerIniHandlers(): void {
   ipcMain.handle('campaign:load', (_event, gamePath: string) => {
     return loadCampaignData(gamePath)
   })
-  ipcMain.handle('zh-singleplayer:load', (_event, gamePath: string, includeCampaigns: boolean) => {
+  ipcMain.handle('zh-singleplayer:load', async (_event, gamePath: string, includeCampaigns: boolean) => {
+    const resourceDir = await getResourceDir()
+    if (resourceDir && /^true$/i.test(readFileSync(join(resourceDir, 'zero-hour', 'game.ini'), 'utf-8').match(/^useGtd=(.*)$/mi)?.[1]?.trim() ?? '')) {
+      const root = join(resourceDir, 'zero-hour')
+      return loadZhSinglePlayerLayers([join(root, 'zh'), join(root, 'playground')], includeCampaigns)
+    }
     return loadZhSinglePlayer(gamePath, includeCampaigns)
   })
 

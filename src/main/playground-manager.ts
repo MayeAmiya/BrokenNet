@@ -30,6 +30,9 @@ export interface PlaygroundApplyResult {
   playgroundPath?: string
   /** 独立地图库目录（写 spawn.ini [Settings] MPMapsPath，游戏从这里读下载/导入的地图） */
   mapsPath?: string
+  /** TD 三层内容目录：Generals 基础、Zero Hour 基础、MOD 覆盖层。 */
+  generalsPath?: string
+  zeroHourPath?: string
   error?: string
 }
 
@@ -123,6 +126,16 @@ function readInstallPath(gameIniPath: string): string {
     }
   } catch { /* 文件不存在 */ }
   return ''
+}
+
+function readGameIniValue(gameIniPath: string, key: string): string {
+  try {
+    const content = fs.readFileSync(gameIniPath, 'utf-8')
+    const line = content.split(/\r?\n/).find((item) => item.trim().toLowerCase().startsWith(`${key.toLowerCase()}=`))
+    return line ? line.slice(line.indexOf('=') + 1).trim() : ''
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -480,6 +493,65 @@ async function getPlaySetPackageNames(resourceDir: string, gameId: string, modSe
   }
 }
 
+function linkTdBase(srcDir: string, dstDir: string, stats: LinkStats): void {
+  clearDir(dstDir)
+  fs.mkdirSync(dstDir, { recursive: true })
+  if (fs.existsSync(srcDir)) linkMod(srcDir, dstDir, stats)
+}
+
+async function applyTdPlayground(
+  resourceDir: string,
+  gameId: string,
+  modSetId: string,
+  basePkgDir: string,
+  onProgress: (percent: number, label: string) => void,
+  stats: LinkStats
+): Promise<PlaygroundApplyResult> {
+  const root = path.join(resourceDir, gameId)
+  const generalsPath = readGameIniValue(path.join(root, 'game.ini'), 'generalsPath')
+  const generalsDir = path.join(root, 'generals')
+  const zeroHourDir = path.join(root, 'zh')
+  const playground = path.join(root, 'playground')
+
+  onProgress(8, '准备 TD 三层目录...')
+  linkTdBase(generalsPath, generalsDir, stats)
+  onProgress(28, '链接 Generals 基础...')
+  linkTdBase(basePkgDir, zeroHourDir, stats)
+  onProgress(68, '链接 Zero Hour 基础...')
+  clearDir(playground)
+  fs.mkdirSync(playground, { recursive: true })
+
+  const packageNames = await getPlaySetPackageNames(resourceDir, gameId, modSetId)
+  const baseName = path.basename(basePkgDir)
+  const packageRoot = path.join(root, 'packages')
+  const foreignBase = 'MentalOmega'
+  for (const packageName of packageNames) {
+    if (packageName === baseName || packageName === 'ZeroHour' || packageName === foreignBase) continue
+    const managedRoot = path.join(getModRoot(packageRoot, packageName), packageName)
+    const pkgDir = fs.existsSync(managedRoot) ? managedRoot : path.join(packageRoot, packageName)
+    if (!fs.existsSync(pkgDir)) continue
+    linkMod(pkgDir, playground, stats)
+    if (fs.existsSync(managedRoot)) {
+      const siblings = fs.readdirSync(path.dirname(managedRoot), { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() && (
+          entry.name.startsWith(`${packageName}_patch_`) || entry.name.startsWith(`${packageName}_addon_`)
+        ))
+        .map((entry) => entry.name)
+        .sort((a, b) => a.localeCompare(b))
+      for (const sibling of siblings) linkMod(path.join(path.dirname(managedRoot), sibling), playground, stats)
+    }
+  }
+  onProgress(100, 'TD 三层目录完成')
+  return {
+    ok: stats.failed === 0,
+    playgroundPath: playground,
+    generalsPath: generalsDir,
+    zeroHourPath: zeroHourDir,
+    mapsPath: path.join(root, 'maps'),
+    error: stats.failed ? `${stats.failed} 个文件链接失败：${stats.errors.slice(0, 3).join('；')}` : undefined
+  }
+}
+
 // ─── 主入口 ────────────────────────────────────────────
 
 export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<PlaygroundApplyResult> {
@@ -509,6 +581,10 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     const basePkgDir = path.join(resourceDir, gameId, 'packages', basePkgName)
     if (!fs.existsSync(basePkgDir)) {
       return { ok: false, error: `找不到游戏本体包 ${basePkgName}，请先在包管理中导入` }
+    }
+    const tdMode = gameId === 'zero-hour' && /^true$/i.test(readGameIniValue(path.join(resourceDir, gameId, 'game.ini'), 'useGtd'))
+    if (tdMode) {
+      return await applyTdPlayground(resourceDir, gameId, modSetId, basePkgDir, onProgress ?? (() => {}), stats)
     }
     // 本体包需要完整自足；首次导入时和旧版本迁移时均从已确认安装目录补齐基础资源/设置。
     const installPath = readInstallPath(path.join(resourceDir, gameId, 'game.ini'))
