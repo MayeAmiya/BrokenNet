@@ -1,6 +1,6 @@
 {
   "name": "brokennet",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "BrokenNet — 为重置版将军TD 打造的启动器（附带 CnCNet/DTA 兼容）",
   "main": "./out/main/index.js",
   "scripts": {

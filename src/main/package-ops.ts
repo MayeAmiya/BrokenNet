@@ -33,7 +33,7 @@ function enqueueModSetOperation<T>(gameId: string, operation: () => Promise<T>):
 /** 复制游戏本体时排除的运行时写目录（本体包只含只读资源） */
 export const GAME_COPY_EXCLUDE = new Set([
   'UserData', 'Saved Games', 'Screenshots', 'Client', 'EasyAntiCheat',
-  'plugins', 'GeneralsOnlineGameData', 'Map Editor', 'Resources',
+  'plugins', 'GeneralsOnlineGameData', 'Map Editor',
   'Logs', 'SettingsCache', 'tunnel_cache', 'ClientCrashLogs'
 ])
 

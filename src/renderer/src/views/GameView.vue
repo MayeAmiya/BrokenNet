@@ -43,7 +43,8 @@ const useGenTool = ref(props.profile.useGenTool ?? true)
 // 启用 GeneralsTD 时，GenTool 无效
 watch(useGtd, (val) => {
   if (val) useGenTool.value = false
-  if (!val && (activeTab.value === 'campaign' || activeTab.value === 'multiplayer')) activeTab.value = 'modsets'
+  // GeneralsTD 仅影响 ZH；MO 的单人战役和联机入口始终可用。
+  if (!isMentalOmega.value && !val && (activeTab.value === 'campaign' || activeTab.value === 'multiplayer')) activeTab.value = 'modsets'
   void saveSettings()
 })
 
@@ -67,8 +68,13 @@ const isMentalOmega = computed(() => props.profile.id === 'mental-omega')
 const tabs = computed(() => {
   const allTabs = [
     { id: 'modsets', label: '播放集管理', disabled: !samePartition.value },
-    { id: 'campaign', label: isMentalOmega.value ? '单人战役' : '单人模式', disabled: !useGtd.value, tip: !useGtd.value ? '单人模式仅 GeneralsTD 启动支持' : undefined },
-    { id: 'multiplayer', label: '多人联机', disabled: !useGtd.value, tip: !useGtd.value ? '多人联机仅 GeneralsTD 启动支持' : undefined },
+    // ZH 的单人/联机需要 TD；MO 不受 TD 开关影响。
+    ...(isMentalOmega.value || useGtd.value
+      ? [
+          { id: 'campaign', label: isMentalOmega.value ? '单人战役' : '单人模式' },
+          { id: 'multiplayer', label: '多人联机' }
+        ]
+      : []),
     { id: 'replays', label: '统计', disabled: !samePartition.value },
     { id: 'mods', label: '包管理' },
     { id: 'maps', label: '地图管理' },

@@ -39,7 +39,7 @@ export interface PlaygroundApplyResult {
  *
  * 清单依据真实游戏目录审计（近 90 天写入行为）：
  * - UserData / Saved Games / Screenshots / Save / Logs / SettingsCache：通用
- * - Client / Resources：MO 客户端高频写入（client.log、SkirmishSettings.ini、ClientDefinitions.ini）
+ * - Client：MO 客户端高频写入（client.log、SkirmishSettings.ini、ClientDefinitions.ini）
  * - EasyAntiCheat / plugins / GeneralsOnlineGameData：ZH 反作弊/联机客户端运行时更新
  * - Map Editor：MO 的 FinalAlert.ini 被写
  *
@@ -53,7 +53,6 @@ const WRITABLE_DIRS = new Set([
   'Logs',
   'SettingsCache',
   'Client',
-  'Resources',
   'EasyAntiCheat',
   'plugins',
   'GeneralsOnlineGameData',
@@ -145,6 +144,31 @@ function ensurePackageBaseSettings(installPath: string, basePkgDir: string): voi
         console.error(`[playground] 抽取 ${rel} 失败: ${(e as Error).message}`)
       }
     }
+  }
+}
+
+/**
+ * Resources 是游戏资源，不应整个排除或替换为可写 junction。
+ * 旧版本体包若曾按旧规则漏掉它，仅补齐缺失文件；已有包内容保持不被安装目录覆盖。
+ */
+function ensurePackageBaseResources(installPath: string, basePkgDir: string): void {
+  const srcRoot = path.join(installPath, 'Resources')
+  const dstRoot = path.join(basePkgDir, 'Resources')
+  if (!installPath || !fs.existsSync(srcRoot)) return
+  const copyMissing = (srcDir: string, dstDir: string): void => {
+    fs.mkdirSync(dstDir, { recursive: true })
+    for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+      const srcPath = path.join(srcDir, entry.name)
+      const dstPath = path.join(dstDir, entry.name)
+      if (entry.isDirectory()) copyMissing(srcPath, dstPath)
+      else if (entry.isFile() && !fs.existsSync(dstPath)) fs.copyFileSync(srcPath, dstPath)
+    }
+  }
+  try {
+    copyMissing(srcRoot, dstRoot)
+    console.log('[playground] 已校验本体包 Resources 资源')
+  } catch (e) {
+    console.error(`[playground] 补齐 Resources 失败: ${(e as Error).message}`)
   }
 }
 
@@ -486,6 +510,11 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     if (!fs.existsSync(basePkgDir)) {
       return { ok: false, error: `找不到游戏本体包 ${basePkgName}，请先在包管理中导入` }
     }
+    // 本体包需要完整自足；首次导入时和旧版本迁移时均从已确认安装目录补齐基础资源/设置。
+    const installPath = readInstallPath(path.join(resourceDir, gameId, 'game.ini'))
+    ensurePackageBaseResources(installPath, basePkgDir)
+    ensurePackageBaseSettings(installPath, basePkgDir)
+
     const total = countFiles(basePkgDir)
     let done = 0
     onProgress?.(10, '链接游戏本体包...')
@@ -534,8 +563,6 @@ export async function applyPlayground(opts: PlaygroundApplyOptions): Promise<Pla
     }
 
     // 4. 全局设置（画质/快捷键/音量）→ 从 settings/ 硬链接（包覆盖之后，启动器设置优先）
-    // 首次使用：本体包缺 KeyboardMD 等基础设置文件时，从安装目录抽一份进包（安装目录只是包的源）
-    ensurePackageBaseSettings(readInstallPath(path.join(resourceDir, gameId, 'game.ini')), basePkgDir)
     // 快捷键键位表要全量（游戏直接读 KeyboardMD.ini）：先播种完整键位，再硬链接进游戏目录
     ensureFullKeyboardMap(basePkgDir, path.join(resourceDir, gameId, 'settings'))
     linkGlobalSettings(resourceDir, gameId, basePkgDir, playground, stats)
